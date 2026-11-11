@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Environments / secrets
+venv/
+.venv/
+.env
+
+# Generated pipeline artifacts
+output/*
+!output/.gitkeep
+
+# Videos for the Docker deployment
+videos/
+
+# Source videos downloaded into the project root
+/*.mp4
+/*.MP4
+/*.part
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+.ipynb_checkpoints/

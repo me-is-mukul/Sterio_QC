@@ -1,0 +1,57 @@
+# Base configuration layer.
+# Load order (later layers override earlier ones):
+#   configs/default.yaml -> configs/inference.yaml -> configs/processing.yaml
+#   -> user file passed with --config -> CLI arguments
+# Each top-level section may be defined in exactly one of the three base files.
+
+project:
+  name: stereo_hoi_pipeline
+  # Relative paths are resolved against the project root.
+  output_directory: output
+  preserve_intermediate_files: true
+
+video:
+  # Where URL downloads are saved (project root by default, per the plan).
+  download_directory: "."
+  supported_formats:
+    - mp4
+  validate_before_processing: true
+
+download:
+  timeout_seconds: 60
+  max_retries: 3
+  retry_backoff_seconds: 2
+  chunk_size_bytes: 8388608        # 8 MiB
+  progress_log_percent_step: 10
+  user_agent: stereo-hoi-pipeline
+
+tools:
+  # Executable names (resolved via PATH) or absolute paths.
+  ffmpeg: ffmpeg
+  ffprobe: ffprobe
+  timeout_seconds: 600
+
+metadata:
+  # -count_frames decodes the whole video to count frames exactly. Slow.
+  count_frames: false
+
+hashing:
+  chunk_size_bytes: 8388608
+
+environment:
+  # Timeout for collecting tool/runtime versions (e.g. Ollama /api/version).
+  probe_timeout_seconds: 3
+
+logging:
+  console_level: INFO
+  file_level: DEBUG
+
+reporting:
+  generate_json: true
+  generate_csv: true
+  generate_summary: true
+
+web:
+  # Dashboard (scripts/serve_ui.py). Use 0.0.0.0 to show it to others on your network.
+  host: 127.0.0.1
+  port: 8000

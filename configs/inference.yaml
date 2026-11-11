@@ -1,0 +1,32 @@
+# Inference provider configuration.
+#
+# Default: Ollama (local, or exposed through ngrok). Set in .env:
+#   OLLAMA_BASE_URL   e.g. http://localhost:11434 or https://<name>.ngrok-free.dev
+#   OLLAMA_MODEL      e.g. qwen3-vl:4b
+#   OLLAMA_API_KEY    optional Bearer token
+# Alternative: INFERENCE_PROVIDER=openai_compatible with VLLM_BASE_URL / VLLM_MODEL /
+# VLLM_API_KEY (vLLM or a hosted OpenAI-compatible API). Only the selected provider's
+# variables are applied. API keys are never stored.
+
+inference:
+  provider: ollama
+  base_url: http://localhost:11434
+  model: qwen3-vl:4b
+  timeout_seconds: 180
+  max_retries: 3
+  retry_backoff_seconds: 2
+  temperature: 0.1
+  # Qwen3 "thinking" mode. false = answer directly (faster). null = model default.
+  think: false
+  # Upper bound on generated tokens per pair (the JSON answer is ~150-300 tokens).
+  max_output_tokens: 1024
+  # Ollama: how long the model stays loaded between requests.
+  keep_alive: 10m
+  # Sequential requests only.
+  max_concurrency: 1
+  # Selects the prompt template in inference/prompts.py. Changing it invalidates the cache.
+  prompt_version: hoi-stereo-v1
+  # What a failed request becomes. Never WASTE.
+  #   uncertain   -> UNCERTAIN (preserved)
+  #   unavailable -> UNAVAILABLE (preserved, reported separately)
+  failure_policy: uncertain

@@ -1,0 +1,67 @@
+# Telemetry, stereo, sampling, HOI and segmentation parameters.
+
+telemetry:
+  # GPMF FourCCs parsed into CSVs. Raw telemetry is always preserved in full.
+  parse_streams:
+    - ACCL
+    - GYRO
+
+stereo:
+  layout: side_by_side
+  split_ratio: 0.5
+  left_camera: left
+  right_camera: right
+
+sampling:
+  interval_seconds: 1
+  image_format: jpg
+  max_width: 1280
+  jpeg_quality: 85
+  # One decode pass over the whole video; long 4K files need generous time.
+  timeout_seconds: 3600
+  # false: each stereo pair is deleted as soon as it has been classified (only the
+  # frame index with timestamps + hashes is kept; any pair can be re-extracted
+  # byte-identically). true: keep all images (debugging / dataset export).
+  keep_frames: false
+
+hoi:
+  # Minimum continuous WASTE duration (seconds) before an interval is removed.
+  # Override at runtime with --waste-threshold.
+  waste_threshold_seconds: 5
+  classifications:
+    - RELEVANT
+    - WASTE
+    - UNCERTAIN
+  uncertain_policy: preserve
+
+verification:
+  # Before anything is cut, every candidate waste section is re-checked at a finer
+  # step. A section is removed ONLY where no relevant HOI is found: every finer sample
+  # that is not WASTE (RELEVANT / UNCERTAIN / failed) is protected together with a
+  # guard margin, and only the remaining pieces that still last >= N seconds are removed.
+  enabled: true
+  interval_seconds: 0.5
+  guard_seconds: 0.5
+
+qc:
+  # Quality checks run after cutting. Any failed check fails the run.
+  fail_run_on_failure: true
+  # Frame alignment: processed frame vs original frame at the mapped time.
+  min_alignment_psnr_db: 30
+  alignment_checkpoints_max: 15
+  # Full decode of the processed video to detect corruption.
+  decode_check: true
+  # Warn when this share of inference results is failed or invalid.
+  max_inference_problem_ratio: 0.05
+
+segmentation:
+  preserve_stereo: true
+  preserve_audio: true
+  synchronize_imu: true
+  # Re-encoding gives frame-accurate cuts. libx264 is portable; on an NVIDIA GPU
+  # use:  video_encoder: h264_nvenc   video_encoder_args: ["-preset", "p5", "-cq", "19"]
+  video_encoder: libx264
+  video_encoder_args: ["-preset", "fast", "-crf", "18"]
+  pixel_format: yuv420p
+  audio_encoder: aac
+  timeout_seconds: 7200

@@ -1,0 +1,8 @@
+# Optional override: encode the processed video on an NVIDIA GPU (NVENC).
+# Not loaded by default. Use:  --config configs/nvenc.yaml
+# ~5x faster than libx264 on an RTX 4050 for 3840x1200 footage.
+
+segmentation:
+  video_encoder: h264_nvenc
+  # Constant-quality VBR capped at 25 Mbit/s (cq 23 gave ~28 Mbit/s on the sample video).
+  video_encoder_args: ["-preset", "p5", "-rc", "vbr", "-cq", "25", "-b:v", "0", "-maxrate", "25M", "-bufsize", "50M"]

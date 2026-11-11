@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stereo-hoi-pipeline"
+dynamic = ["version"]
+description = "Modular, reproducible preprocessing pipeline for egocentric stereo video with HOI-based waste removal and IMU synchronization."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "PyYAML>=6.0",
+]
+
+[project.scripts]
+stereo-hoi = "video_pipeline.cli:main"
+stereo-hoi-ui = "video_pipeline.web.server:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "video_pipeline.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+video_pipeline = ["web/static/*.html"]

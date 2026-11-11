@@ -1,0 +1,4 @@
+# Runtime dependencies (Phase 1). Keep in sync with pyproject.toml.
+# External tools required on PATH (or configured in configs/default.yaml -> tools):
+#   ffmpeg, ffprobe
+PyYAML>=6.0

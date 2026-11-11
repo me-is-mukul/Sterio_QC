@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stereo HOI Pipeline</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --text: #1d2330; --muted: #6b7385; --line: #e3e6ec;
+    --rel: #2f9e5f; --waste: #d64545; --unc: #e2a72e; --na: #a3a9b6; --pending: #e9ecf1;
+    --accent: #3b6fd8;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #12151b; --card: #1a1e26; --text: #e6e9ef; --muted: #8f97a8; --line: #2a303b; --pending: #252b35; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display: flex; align-items: center; gap: 12px; padding: 14px 24px; border-bottom: 1px solid var(--line); background: var(--card); flex-wrap: wrap; }
+  header h1 { font-size: 16px; margin: 0; font-weight: 650; }
+  header .spacer { flex: 1; }
+  select { font: inherit; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--card); color: var(--text); }
+  main { max-width: 1280px; margin: 0 auto; padding: 20px 24px 40px; display: grid; gap: 16px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+  .card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 12px; font-weight: 600; }
+  .pill { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; color: #fff; background: var(--na); }
+  .pill.completed { background: var(--rel); } .pill.running { background: var(--accent); } .pill.failed { background: var(--waste); }
+  .pill.partial, .pill.interrupted { background: var(--unc); }
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+  .kpi .v { font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .kpi .l { color: var(--muted); font-size: 12px; }
+  .kpi .s { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; color: var(--muted); font-size: 12px; margin-bottom: 10px; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+  .track { position: relative; height: 44px; display: flex; border-radius: 6px; overflow: hidden; background: var(--pending); cursor: pointer; }
+  .cell { height: 100%; border-right: 1px solid color-mix(in srgb, var(--card) 40%, transparent); }
+  .cell.sel { outline: 2px solid var(--text); outline-offset: -2px; z-index: 2; }
+  .removed { position: absolute; top: 0; bottom: 0; pointer-events: none;
+    background: repeating-linear-gradient(135deg, rgba(0,0,0,.35) 0 4px, transparent 4px 8px); border-left: 2px solid #000; border-right: 2px solid #000; }
+  .axis, .chapters { position: relative; height: 18px; font-size: 11px; color: var(--muted); }
+  .axis span, .chapters span { position: absolute; transform: translateX(-50%); white-space: nowrap; }
+  .chapters span { transform: none; border-left: 1px solid var(--muted); padding-left: 4px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .pair figure { margin: 0; } .pair img { width: 100%; border-radius: 6px; display: block; background: var(--pending); aspect-ratio: 16/10; object-fit: cover; }
+  .pair figcaption { font-size: 11px; color: var(--muted); margin-top: 3px; }
+  .viewer-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+  .viewer-head .t { font-variant-numeric: tabular-nums; font-weight: 600; }
+  button { font: inherit; padding: 4px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--card); color: var(--text); cursor: pointer; }
+  button:hover { border-color: var(--muted); }
+  .desc { margin: 10px 0 4px; } .muted { color: var(--muted); } .small { font-size: 12px; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; } td.n, th.n { text-align: right; }
+  video { width: 100%; border-radius: 8px; background: #000; }
+  .stages { list-style: none; padding: 0; margin: 0; }
+  .stages li { display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px solid var(--line); }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; background: var(--na); }
+  .dot.completed { background: var(--rel); } .dot.running { background: var(--accent); } .dot.failed, .dot.interrupted { background: var(--waste); }
+  .bar { height: 6px; background: var(--pending); border-radius: 3px; overflow: hidden; margin-top: 8px; }
+  .bar > div { height: 100%; background: var(--accent); }
+  .empty { text-align: center; padding: 60px 20px; color: var(--muted); }
+  code { background: var(--pending); padding: 1px 5px; border-radius: 4px; }
+  .note { font-size: 12px; color: var(--muted); margin-top: 10px; }
+  .pill.pass { background: var(--rel); } .pill.warn { background: var(--unc); } .pill.fail { background: var(--waste); }
+  .checks { list-style: none; padding: 0; margin: 0; }
+  .checks li { display: flex; gap: 10px; padding: 6px 0; border-bottom: 1px solid var(--line); align-items: flex-start; }
+  .qs { flex: none; min-width: 58px; text-align: center; font-size: 11px; font-weight: 700; text-transform: uppercase;
+        padding: 2px 6px; border-radius: 4px; color: #fff; background: var(--na); }
+  .qs.pass { background: var(--rel); } .qs.warn { background: var(--unc); } .qs.fail { background: var(--waste); }
+  .cand { position: absolute; top: -3px; bottom: -3px; border: 2px dashed var(--text); border-radius: 4px; pointer-events: none; opacity: .55; }
+  .noimg { padding: 28px 16px; text-align: center; color: var(--muted); background: var(--pending); border-radius: 6px; font-size: 13px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Stereo HOI Pipeline</h1>
+  <select id="run" aria-label="Run"></select>
+  <span id="status" class="pill"></span>
+  <span class="spacer"></span>
+  <span id="updated" class="muted small"></span>
+</header>
+<main id="app"><div class="empty">Loading…</div></main>
+
+<script>
+const COLORS = { RELEVANT: "var(--rel)", WASTE: "var(--waste)", UNCERTAIN: "var(--unc)", UNAVAILABLE: "var(--na)", MISSING: "var(--na)" };
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const fmtT = (s) => s == null ? "–" : `${Math.floor(s / 60)}:${(s % 60).toFixed(1).padStart(4, "0")}`;
+const pct = (v) => v == null ? "–" : `${(+v).toFixed(1)}%`;
+let S = { name: null, ov: null, samples: [], sel: 0, timer: null };
+
+async function getJSON(url) { const r = await fetch(url, { cache: "no-store" }); if (!r.ok) throw new Error(r.status); return r.json(); }
+
+async function loadRuns() {
+  const runs = await getJSON("/api/runs");
+  const sel = $("#run");
+  if (!runs.length) {
+    $("#app").innerHTML = `<div class="empty">No runs yet.<br><br>Run <code>python scripts/run_pipeline.py --input STEREO_01.mp4 --waste-threshold 5</code></div>`;
+    return;
+  }
+  const want = new URLSearchParams(location.search).get("run") || S.name || runs[0].name;
+  sel.innerHTML = runs.map((r) => `<option value="${esc(r.name)}">${esc(r.name)}</option>`).join("");
+  sel.value = runs.some((r) => r.name === want) ? want : runs[0].name;
+  sel.onchange = () => { S.name = sel.value; S.sel = 0; history.replaceState(null, "", `?run=${encodeURIComponent(S.name)}`); loadRun(); };
+  S.name = sel.value;
+  loadRun();
+}
+
+async function loadRun() {
+  clearTimeout(S.timer);
+  try {
+    const [ov, samples] = await Promise.all([getJSON(`/api/runs/${S.name}`), getJSON(`/api/runs/${S.name}/samples`)]);
+    S.ov = ov; S.samples = samples;
+    render();
+    $("#updated").textContent = `updated ${new Date().toLocaleTimeString()}`;
+  } catch (e) { $("#app").innerHTML = `<div class="empty">Could not load run (${esc(e.message)}).</div>`; }
+  if (S.ov && S.ov.run.status === "running") S.timer = setTimeout(loadRun, 3000);
+}
+
+function processedTime(t) {
+  const segs = S.ov.processing?.retained_segments || [];
+  const s = segs.find((g) => t >= g.original_start && t < g.original_end);
+  return s ? s.processed_start + (t - s.original_start) : null;
+}
+
+function render() {
+  const ov = S.ov, m = ov.metrics, d = m?.durations, r = m?.ratios_percent;
+  const status = ov.run.status || "unknown";
+  $("#status").className = `pill ${status}`; $("#status").textContent = status;
+  const dur = ov.video.duration || 0;
+  const removed = ov.waste?.intervals || [];
+  const p = ov.progress;
+
+  const kpis = [
+    ["Original duration", fmtT(dur), `${ov.video.width}×${ov.video.height} ${ov.video.codec || ""}`],
+    ["Processed duration", d ? fmtT(d.processed_duration) : "–", r ? `${pct(r.retention)} retained` : ""],
+    ["Waste removed", d ? fmtT(d.removed_duration) : "–", r ? `${pct(r.waste_reduction)} · ${m.counts.waste_intervals_removed} interval(s)` : ""],
+    ["HOI coverage", r ? `${pct(r.hoi_coverage_before)} → ${pct(r.hoi_coverage_after)}` : "–", "RELEVANT time / total"],
+    ["Frames analysed", `${p.classified} / ${p.frames || "–"}`, `stereo pairs · N = ${ov.config.waste_threshold_seconds}s`],
+    ["Avg. inference", m?.inference_latency_seconds?.mean != null ? `${m.inference_latency_seconds.mean.toFixed(2)} s` : "–", ov.config.model || ""],
+  ];
+
+  const cells = S.samples.map((s, i) => {
+    const w = ((Math.min(s.t + (ov.sampling?.interval_seconds || 1), dur) - s.t) / dur) * 100;
+    return `<div class="cell ${i === S.sel ? "sel" : ""}" data-i="${i}" style="width:${w}%;background:${COLORS[s.label] || "var(--pending)"}" title="${fmtT(s.t)} · ${esc(s.label || "pending")}"></div>`;
+  }).join("");
+  const overlays = removed.map((iv) => `<div class="removed" style="left:${(iv.start / dur) * 100}%;width:${((iv.end - iv.start) / dur) * 100}%"></div>`).join("")
+    + (ov.verification?.candidates || []).filter((c) => c.outcome !== "removed").map((c) =>
+      `<div class="cand" title="candidate ${c.outcome.replace("_", " ")} after verification" style="left:${(c.candidate.start / dur) * 100}%;width:${(c.candidate.duration / dur) * 100}%"></div>`).join("");
+  const step = dur > 600 ? 120 : dur > 240 ? 60 : 30;
+  let ticks = ""; for (let t = 0; t <= dur; t += step) ticks += `<span style="left:${(t / dur) * 100}%">${fmtT(t).replace(/\.0$/, "")}</span>`;
+  const chapters = ov.chapters.map((c) => `<span style="left:${(c.start / dur) * 100}%">${esc(c.title)}</span>`).join("");
+
+  const s = S.samples[S.sel];
+  const inferring = status === "running" && p.frames && p.classified < p.frames;
+  const ptime = s ? processedTime(s.t) : null;
+  const isRemoved = s && removed.some((iv) => s.t >= iv.start && s.t < iv.end);
+
+  const rows = (m?.comparison || []).filter((row) => !/unavailable|missing/.test(row.metric) || row.before > 0);
+  const label = (k) => k.replace(/_seconds$/, " (s)").replace(/_percent$/, " (%)").replace(/_/g, " ");
+  const num = (v) => v == null ? "–" : (typeof v === "number" && !Number.isInteger(v) ? v.toFixed(1) : v);
+  const video = ov.processing?.output ? `/files/${encodeURIComponent(ov.name)}/${ov.processing.output}` : null;
+
+  $("#app").innerHTML = `
+    <section class="kpis">${kpis.map(([l, v, sub]) => `<div class="card kpi"><div class="l">${l}</div><div class="v">${v}</div><div class="s">${esc(sub)}</div></div>`).join("")}</section>
+    ${inferring ? `<div class="card"><h2>Inference in progress</h2>${p.classified} of ${p.frames} stereo pairs classified<div class="bar"><div style="width:${(100 * p.classified / p.frames).toFixed(1)}%"></div></div></div>` : ""}
+    <section class="card">
+      <h2>HOI timeline — one stereo pair per ${ov.sampling?.interval_seconds || 1}s</h2>
+      <div class="legend">
+        <span><i style="background:var(--rel)"></i>Relevant HOI</span><span><i style="background:var(--waste)"></i>Waste</span>
+        <span><i style="background:var(--unc)"></i>Uncertain</span><span><i style="background:var(--na)"></i>Unavailable</span>
+        <span><i style="background:repeating-linear-gradient(135deg,#555 0 3px,transparent 3px 6px);border:1px solid #000"></i>Removed (≥ ${ov.config.waste_threshold_seconds}s of verified waste)</span>
+        <span><i style="border:2px dashed var(--text);background:none"></i>Candidate kept/trimmed by verification</span>
+      </div>
+      <div class="track" id="track">${cells}${overlays}</div>
+      <div class="axis">${ticks}</div>
+      ${chapters ? `<div class="chapters">${chapters}</div>` : ""}
+    </section>
+    <section class="grid2">
+      <div class="card">
+        <h2>Stereo pair</h2>
+        ${s ? `
+        <div class="viewer-head">
+          <button id="prev">◀</button><button id="next">▶</button>
+          <span class="t">t = ${fmtT(s.t)}</span>
+          <span class="pill" style="background:${COLORS[s.label] || "var(--na)"}">${esc(s.label || "pending")}</span>
+          ${isRemoved ? `<span class="pill" style="background:#000">removed</span>` : ""}
+          ${ptime != null && video ? `<button id="seek">▶ play at ${fmtT(ptime)} in processed</button>` : ""}
+        </div>
+        ${s.has_images ? `<div class="pair">
+          <figure><img src="/files/${encodeURIComponent(ov.name)}/${s.left}" alt="left camera"><figcaption>Left camera</figcaption></figure>
+          <figure><img src="/files/${encodeURIComponent(ov.name)}/${s.right}" alt="right camera"><figcaption>Right camera</figcaption></figure>
+        </div>` : `<div class="noimg">Frames are deleted right after classification (not stored).${ptime != null && video ? " Use “play in processed” to see this moment." : isRemoved ? " This moment was removed from the processed video." : ""}</div>`}
+        ${s.description ? `<div class="desc">${esc(s.description)}</div>` : ""}
+        ${s.left_camera ? `<div class="small muted">L: ${esc(s.left_camera.description)}<br>R: ${esc(s.right_camera?.description)}</div>` : ""}
+        ${s.evidence?.length ? `<div class="small muted">Evidence: ${s.evidence.map(esc).join(" · ")}</div>` : ""}
+        ${s.status && s.status !== "ok" ? `<div class="small" style="color:var(--waste)">${esc(s.status)}: ${esc((s.errors || []).join("; "))}</div>` : ""}
+        <div class="note">Frame PTS ${s.pts.toFixed(3)}s${s.latency != null ? ` · ${s.latency}s inference` : ""}${s.cached ? " · cached" : ""} · use ← → keys</div>
+        ` : `<div class="muted">No frames sampled yet.</div>`}
+      </div>
+      <div class="card">
+        <h2>Processed video</h2>
+        ${video ? `<video id="vid" src="${video}#t=0.1" controls preload="metadata"></video>
+          <div class="note">${ov.processing.retained_segments.length} retained segment(s) concatenated · ${esc(ov.processing.encoder.video)}</div>`
+                : `<div class="muted">Not produced yet.</div>`}
+      </div>
+    </section>
+    <section class="grid2">
+      <div class="card">
+        <h2>Quality checks ${ov.qc ? `<span class="pill ${ov.qc.status}">${esc(ov.qc.status)}</span>` : ""}</h2>
+        ${ov.qc ? `<ul class="checks">${ov.qc.checks.map((c) => `<li><span class="qs ${c.status}">${esc(c.status)}</span>
+          <div><div>${esc(c.title)}</div><div class="small muted">${esc(c.detail)}</div></div></li>`).join("")}</ul>`
+          : `<div class="muted">Runs after the video is cut.</div>`}
+      </div>
+      <div class="card">
+        <h2>Waste verification</h2>
+        ${ov.verification ? `
+          <div class="small muted" style="margin-bottom:8px">Every candidate section (≥ ${ov.verification.threshold_seconds}s of waste at 1 sample/s) is re-checked every
+          ${ov.verification.interval_seconds}s before cutting. Anything not clearly waste is protected (±${ov.verification.guard_seconds}s).</div>
+          ${ov.verification.candidates.length ? `<table><tr><th>Candidate</th><th>Outcome</th><th class="n">Removed</th><th>Protected at</th></tr>
+          ${ov.verification.candidates.map((c) => `<tr><td>${fmtT(c.candidate.start)}–${fmtT(c.candidate.end)}</td>
+            <td><span class="qs ${c.outcome === "removed" ? "pass" : c.outcome === "kept" ? "skipped" : "warn"}">${esc(c.outcome.replace("_", " "))}</span></td>
+            <td class="n">${c.removed.reduce((a, r) => a + r.duration, 0).toFixed(1)}s</td>
+            <td class="small">${c.non_waste_samples.slice(0, 4).map((n) => `${n.timestamp}s ${esc(n.label.toLowerCase())}`).join(", ") || "–"}</td></tr>`).join("")}
+          </table>` : `<div class="muted">No section qualified for removal.</div>`}`
+          : `<div class="muted">Available after verification.</div>`}
+      </div>
+    </section>
+    <section class="grid2">
+      <div class="card">
+        <h2>Before / after</h2>
+        ${rows.length ? `<table><tr><th>Metric</th><th class="n">Original</th><th class="n">Processed</th></tr>
+          ${rows.map((row) => `<tr><td>${esc(label(row.metric))}</td><td class="n">${num(row.before)}</td><td class="n">${num(row.after)}</td></tr>`).join("")}</table>
+          <div class="note">Durations come from 1 sample per second (approximate boundaries). A higher HOI share after processing reflects removed waste, not better detection.</div>`
+          : `<div class="muted">Available after the metrics stage.</div>`}
+      </div>
+      <div class="card">
+        <h2>Pipeline</h2>
+        <ul class="stages">${ov.stages.map((st) => `<li><span><span class="dot ${st.status || ""}"></span>${esc(st.name)}</span>
+          <span class="muted small">${st.status === "completed" && st.elapsed != null ? `${st.elapsed.toFixed(1)}s` : esc(st.status || "pending")}</span></li>`).join("")}</ul>
+        <div class="note">
+          IMU: ${ov.imu?.available ? "synchronized" : esc(ov.imu?.reason || "–")}<br>
+          Run ${esc(ov.run.run_id)} · model ${esc(ov.config.model)}${ov.config.model_digest ? ` (${esc(ov.config.model_digest.slice(0, 12))})` : ""} · prompt ${esc(ov.config.prompt_version)}<br>
+          Source ${esc(ov.source.filename)} · sha256 ${esc((ov.source.sha256 || "").slice(0, 16))}…
+        </div>
+      </div>
+    </section>`;
+
+  $("#track")?.addEventListener("click", (e) => { const i = e.target.dataset?.i; if (i != null) { S.sel = +i; render(); } });
+  $("#prev")?.addEventListener("click", () => move(-1));
+  $("#next")?.addEventListener("click", () => move(1));
+  $("#seek")?.addEventListener("click", () => { const v = $("#vid"); if (v) { v.currentTime = ptime; v.play(); v.scrollIntoView({ block: "nearest" }); } });
+}
+
+function move(delta) { if (!S.samples.length) return; S.sel = Math.max(0, Math.min(S.samples.length - 1, S.sel + delta)); render(); }
+document.addEventListener("keydown", (e) => { if (e.key === "ArrowLeft") move(-1); if (e.key === "ArrowRight") move(1); });
+loadRuns();
+</script>
+</body>
+</html>
