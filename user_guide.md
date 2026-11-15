@@ -34,11 +34,19 @@ hands are working with objects, plus a report and a quality check.
 
 - [ ] The project is set up (`venv` exists). If not, see [guide.md](docs/guide.md).
 - [ ] The video is in the project folder (e.g. `STEREO_01.mp4`).
-- [ ] `.env` contains the model address:
+- [ ] `.env` contains the model address (copy `.env.example` to `.env`). For a hosted
+  OpenAI-compatible server (e.g. vLLM serving Qwen2.5-VL-7B):
   ```ini
-  OLLAMA_BASE_URL=https://ecologist-eloquence-reliable.ngrok-free.dev   # or http://localhost:11434
-  OLLAMA_MODEL=qwen3-vl:4b
+  INFERENCE_PROVIDER=openai_compatible
+  VLLM_BASE_URL=http://<server-ip>:8000/v1
+  VLLM_MODEL=Qwen/Qwen2.5-VL-7B-Instruct
+  VLLM_API_KEY=<key>
   ```
+  For a local Ollama instead, set `INFERENCE_PROVIDER=ollama` (it uses `OLLAMA_BASE_URL` / `OLLAMA_MODEL`).
+  With a hosted server, skip the Ollama/ngrok part of section 3.
+- [ ] **Pre-flight check:** `python scripts/check_endpoint.py`. It must end with
+  `Ready: run the pipeline.` It tests the server, the API key, the model, and one
+  real stereo pair from your video.
 
 ---
 
@@ -48,7 +56,7 @@ hands are working with objects, plus a report and a quality check.
 1. Start **Ollama** from the Start menu (tray icon appears).
 2. Only if you use the tunnel, run this and keep the window open:
    ```powershell
-   ngrok http 11434 --host-header="localhost:11434" --url=https://ecologist-eloquence-reliable.ngrok-free.dev
+   ngrok http 11434 --host-header="localhost:11434" --url=https://<your-name>.ngrok-free.dev
    ```
    It should show `Session Status  online`.
 

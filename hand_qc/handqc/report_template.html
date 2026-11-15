@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hand &amp; Technical QC</title>
+<style>
+:root{
+  --bg:#f6f7f9;--panel:#ffffff;--ink:#1c2230;--muted:#5f6b7a;--line:#e3e6eb;--head:#1f2a44;
+  --pass:#1f8a4c;--pass-bg:#e3f4ea;--fail:#b42323;--fail-bg:#fbe4e4;--miss:#6b7280;--miss-bg:#eceef1;
+  --err:#9a5b00;--err-bg:#fcefd9;--info-bg:#f1f3f6;--accent:#2f5d8a;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#11151c;--panel:#181e27;--ink:#e6e9ee;--muted:#9aa5b4;--line:#2a323e;--head:#0c1220;
+    --pass:#5ccf8b;--pass-bg:#173a27;--fail:#f08080;--fail-bg:#3f1d1f;--miss:#a3abb7;--miss-bg:#262c36;
+    --err:#f0b45c;--err-bg:#3a2c15;--info-bg:#1f2630;--accent:#7fb0e0;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#11151c;--panel:#181e27;--ink:#e6e9ee;--muted:#9aa5b4;--line:#2a323e;--head:#0c1220;
+  --pass:#5ccf8b;--pass-bg:#173a27;--fail:#f08080;--fail-bg:#3f1d1f;--miss:#a3abb7;--miss-bg:#262c36;
+  --err:#f0b45c;--err-bg:#3a2c15;--info-bg:#1f2630;--accent:#7fb0e0;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 "Segoe UI",system-ui,-apple-system,Roboto,Arial,sans-serif}
+header{background:var(--head);color:#fff;padding:22px 24px}
+header h1{margin:0;font-size:20px;font-weight:600}
+header p{margin:4px 0 0;color:#c4ccd8;font-size:13px}
+main{max-width:1500px;margin:0 auto;padding:18px 16px 60px}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:16px}
+.kpi{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+.kpi .v{font-size:26px;font-weight:650}
+.kpi .l{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.04em}
+.kpi.pass .v{color:var(--pass)}.kpi.fail .v{color:var(--fail)}.kpi.miss .v{color:var(--miss)}.kpi.err .v{color:var(--err)}
+section.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:16px}
+section.card h2{font-size:15px;margin:0 0 12px}
+.rates{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:8px 22px}
+.rate{display:grid;grid-template-columns:130px 1fr 52px;align-items:center;gap:8px;font-size:13px}
+.bar{height:8px;border-radius:4px;background:var(--fail-bg);overflow:hidden}
+.bar i{display:block;height:100%;background:var(--pass)}
+.rate .n{text-align:right;color:var(--muted);font-variant-numeric:tabular-nums}
+.controls{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px}
+.chip{border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:999px;padding:5px 12px;cursor:pointer;font:inherit;font-size:13px}
+.chip[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:#fff}
+input[type=search],select{border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:8px;padding:6px 10px;font:inherit;font-size:13px}
+input[type=search]{min-width:220px;flex:1;max-width:340px}
+.tablewrap{overflow-x:auto;border:1px solid var(--line);border-radius:10px;background:var(--panel)}
+table{border-collapse:collapse;width:100%;font-size:12.5px}
+th,td{padding:6px 8px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}
+thead th{position:sticky;top:0;background:var(--panel);font-weight:600;color:var(--muted);font-size:11.5px;text-transform:uppercase;letter-spacing:.03em;z-index:1}
+th.grp-t{border-top:3px solid #2f5d8a}th.grp-h{border-top:3px solid #3c7d5a}
+tbody tr{cursor:pointer}tbody tr:hover{background:var(--info-bg)}
+tbody tr.sel{outline:2px solid var(--accent);outline-offset:-2px}
+td.num{text-align:right;font-variant-numeric:tabular-nums}
+td.PASS{background:var(--pass-bg)}td.FAIL{background:var(--fail-bg);color:var(--fail);font-weight:600}
+.badge{display:inline-block;border-radius:6px;padding:2px 8px;font-weight:650;font-size:11.5px}
+.badge.PASS{background:var(--pass-bg);color:var(--pass)}.badge.FAIL{background:var(--fail-bg);color:var(--fail)}
+.badge.MISS{background:var(--miss-bg);color:var(--miss)}.badge.ERROR{background:var(--err-bg);color:var(--err)}
+.badge.INFO,.badge.NA{background:var(--info-bg);color:var(--muted)}
+td.task{max-width:240px;overflow:hidden;text-overflow:ellipsis}
+#detail{display:none}
+#detail.open{display:block}
+.dgrid{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);gap:18px}
+@media (max-width:980px){.dgrid{grid-template-columns:1fr}}
+.dgrid img{width:100%;border-radius:8px;border:1px solid var(--line);background:#000}
+.legend{font-size:12px;color:var(--muted);margin-top:6px}
+.legend b{display:inline-block;width:10px;height:10px;border-radius:2px;margin:0 4px 0 10px;vertical-align:-1px}
+.tests td{white-space:normal}
+.tests td:first-child{white-space:nowrap}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:3px 14px;font-size:13px}
+.kv div:nth-child(odd){color:var(--muted)}
+a{color:var(--accent)}
+.muted{color:var(--muted)}
+details summary{cursor:pointer;font-weight:600}
+dl.defs dt{font-weight:600;margin-top:10px}dl.defs dd{margin:2px 0 0;color:var(--muted)}
+.close{float:right}
+</style>
+</head>
+<body>
+<header>
+  <h1>Egocentric Video QC &mdash; Hand &amp; Technical Checklist</h1>
+  <p id="sub"></p>
+</header>
+<main>
+  <div class="kpis" id="kpis"></div>
+  <section class="card"><h2>Pass rate per test <span class="muted" style="font-weight:400">(analysed clips; reported-only metrics excluded)</span></h2><div class="rates" id="rates"></div></section>
+  <section class="card" id="detail"></section>
+  <section class="card">
+    <h2>Checklist</h2>
+    <div class="controls">
+      <button class="chip" data-f="all" aria-pressed="true">All</button>
+      <button class="chip" data-f="PASS" aria-pressed="false">PASS</button>
+      <button class="chip" data-f="FAIL" aria-pressed="false">FAIL</button>
+      <button class="chip" data-f="SOURCE MISSING" aria-pressed="false">Source missing</button>
+      <select id="ds"><option value="">All datasets</option></select>
+      <input type="search" id="q" placeholder="Search task, category, clip id">
+    </div>
+    <div class="tablewrap"><table id="tbl"><thead></thead><tbody></tbody></table></div>
+    <p class="muted" style="font-size:12px">Click a row for the full test list, thresholds and an annotated frame. Coloured cells are graded tests (green PASS, red FAIL); uncoloured values are reported only.</p>
+  </section>
+  <section class="card"><details><summary>Metric definitions</summary><dl class="defs" id="defs"></dl></details></section>
+</main>
+<script>
+const DATA = /*__DATA__*/null;
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fmt = v => v === null || v === undefined || v === "" ? "–" : (typeof v === "number" ? (Number.isInteger(v) ? v : v.toFixed(Math.abs(v) >= 100 ? 1 : 2)) : v);
+const COLS = [
+  ["Duration s","duration"],["FPS","fps"],["Mbit/s","bitrate"],["Codec","codec"],["Decode err","decode_errors"],
+  ["Luma","luminance"],["Sharp %","sharpness"],["Block","blockiness"],["Cast","colour_cast"],["Upright %","orientation"],
+  ["Either %","either_hand_pct"],["Both %","both_hands_pct"],["Left %","left_hand_pct"],["Right %","right_hand_pct"],
+  ["HOI %","hoi_pct"],["Losses /min","tracking_losses"],["Untracked %","untracked_pct"],["Grasps","grasp_count"],
+  ["Grasp s","grasp_duration"],["Gap s","longest_hand_gap"],["Others %","other_hands_pct"]];
+const TECH = new Set(["duration","fps","bitrate","codec","decode_errors","luminance","sharpness","blockiness","colour_cast","orientation"]);
+const resultClass = r => r === "SOURCE MISSING" ? "MISS" : r;
+let filter = "all";
+
+document.getElementById("sub").textContent = `Dataset: ${DATA.dataset} (clip list ${DATA.source_csv}) · ${DATA.clips.length} clips · generated ${DATA.generated} · handqc ${DATA.version}`;
+document.title = `Hand & Technical QC · ${DATA.dataset}`;
+const count = r => DATA.clips.filter(c => c.result === r).length;
+document.getElementById("kpis").innerHTML = [
+  ["Clips in list", DATA.clips.length, ""], ["PASS", count("PASS"), "pass"], ["FAIL", count("FAIL"), "fail"],
+  ["Source missing", count("SOURCE MISSING"), "miss"], ["Errors", count("ERROR"), "err"]]
+  .map(([l, v, c]) => `<div class="kpi ${c}"><div class="v">${v}</div><div class="l">${l}</div></div>`).join("");
+
+const analysed = DATA.clips.filter(c => c.tests);
+document.getElementById("rates").innerHTML = DATA.test_order.map(id => {
+  const ts = analysed.map(c => c.tests.find(t => t.id === id)).filter(Boolean);
+  const p = ts.filter(t => t.status === "PASS").length, f = ts.filter(t => t.status === "FAIL").length;
+  if (!ts.length || p + f === 0) return "";
+  const pctv = Math.round(100 * p / (p + f));
+  return `<div class="rate" title="${esc(ts[0].threshold)}"><span>${esc(ts[0].name)}</span><span class="bar"><i style="width:${pctv}%"></i></span><span class="n">${p}/${p + f}</span></div>`;
+}).join("");
+
+const dsSel = document.getElementById("ds");
+[...new Set(DATA.clips.map(c => c.dataset))].forEach(d => dsSel.insertAdjacentHTML("beforeend", `<option>${esc(d)}</option>`));
+
+const thead = document.querySelector("#tbl thead");
+thead.innerHTML = "<tr><th>#</th><th>Task</th><th>Dataset</th><th>Camera</th><th>Result</th><th>Passed</th>" +
+  COLS.map(([h, id]) => `<th class="${TECH.has(id) ? "grp-t" : "grp-h"}">${h}</th>`).join("") + "</tr>";
+
+function cell(c, id) {
+  if (!c.tests) return `<td class="num muted">–</td>`;
+  const t = c.tests.find(x => x.id === id);
+  if (!t) return `<td></td>`;
+  const st = t.status === "PASS" || t.status === "FAIL" ? t.status : "";
+  return `<td class="num ${st}" title="${esc(t.name)}: ${esc(fmt(t.value))} ${esc(t.unit)} | ${esc(t.threshold)}${t.detail ? " | " + esc(t.detail) : ""}">${esc(fmt(t.value))}</td>`;
+}
+function render() {
+  const q = document.getElementById("q").value.trim().toLowerCase(), ds = dsSel.value;
+  const rows = DATA.clips.filter(c => (filter === "all" || c.result === filter) && (!ds || c.dataset === ds) &&
+    (!q || [c.task, c.category, c.id, c.camera].join(" ").toLowerCase().includes(q)));
+  document.querySelector("#tbl tbody").innerHTML = rows.map(c =>
+    `<tr data-id="${esc(c.id)}"><td class="num">${c.no}</td><td class="task" title="${esc(c.category)}">${esc(c.task)}</td><td>${esc(c.dataset)}</td><td>${esc(c.camera || c.layout)}</td>` +
+    `<td><span class="badge ${resultClass(c.result)}">${esc(c.result)}</span></td><td class="num">${esc(c.passed || "")}</td>` +
+    COLS.map(([, id]) => cell(c, id)).join("") + "</tr>").join("") ||
+    `<tr><td colspan="${COLS.length + 6}" class="muted">No clips match.</td></tr>`;
+}
+document.querySelectorAll(".chip").forEach(b => b.addEventListener("click", () => {
+  filter = b.dataset.f; document.querySelectorAll(".chip").forEach(x => x.setAttribute("aria-pressed", x === b)); render();
+}));
+dsSel.addEventListener("change", render);
+document.getElementById("q").addEventListener("input", render);
+document.querySelector("#tbl tbody").addEventListener("click", e => {
+  const tr = e.target.closest("tr[data-id]"); if (!tr) return;
+  document.querySelectorAll("tbody tr.sel").forEach(x => x.classList.remove("sel")); tr.classList.add("sel");
+  showDetail(DATA.clips.find(c => c.id === tr.dataset.id));
+});
+
+function showDetail(c) {
+  const el = document.getElementById("detail");
+  let body = `<button class="chip close" onclick="document.getElementById('detail').classList.remove('open')">Close</button>
+    <h2>#${c.no} · ${esc(c.task)} <span class="badge ${resultClass(c.result)}">${esc(c.result)}</span></h2>
+    <div class="kv" style="margin-bottom:12px"><div>Clip ID</div><div>${esc(c.id)}</div><div>Dataset / category</div><div>${esc(c.dataset)} · ${esc(c.category)}</div>
+    <div>Camera / layout</div><div>${esc(c.camera || "–")} · ${esc(c.layout)}</div>
+    <div>Source</div><div>${c.url ? `<a href="${esc(c.url)}" target="_blank" rel="noopener">${esc(c.url)}</a>` : `<span class="muted">${esc(c.ref || "no URL in the source list")}</span>`}</div>
+    ${c.reason ? `<div>Result notes</div><div>${esc(c.reason)}</div>` : ""}</div>`;
+  if (c.tests) {
+    const rowsT = c.tests.map(t => `<tr><td>${esc(t.group)}</td><td>${esc(t.name)}</td><td class="num">${esc(fmt(t.value))} ${esc(t.unit)}</td><td>${esc(t.threshold)}</td><td><span class="badge ${t.status === "N/A" ? "NA" : t.status}">${esc(t.status)}</span></td><td class="muted">${esc(t.detail)}</td></tr>`).join("");
+    const pv = Object.entries(c.per_view || {}).map(([v, m]) => `<tr><td>${esc(v)}</td><td class="num">${fmt(m.either_hand_pct)}</td><td class="num">${fmt(m.both_hands_pct)}</td><td class="num">${fmt(m.left_hand_pct)}</td><td class="num">${fmt(m.right_hand_pct)}</td><td class="num">${fmt(m.other_hands_pct)}</td></tr>`).join("");
+    body += `<div class="dgrid"><div>${c.preview ? `<img src="${esc(c.preview)}" alt="Analysed frame with detected hands">
+      <div class="legend">Wearer: <b style="background:#00a0ff"></b>left <b style="background:#ffc800"></b>right <b style="background:#e63c3c"></b>other person</div>` : ""}
+      ${c.views && c.views.length > 1 ? `<h3 style="font-size:13px;margin:14px 0 6px">Per camera view (%)</h3><div class="tablewrap"><table><thead><tr><th>View</th><th>Either</th><th>Both</th><th>Left</th><th>Right</th><th>Others</th></tr></thead><tbody>${pv}</tbody></table></div>` : ""}
+      <p style="font-size:13px">Files: <a href="videos/${esc(c.id)}/landmarks.csv">landmarks.csv</a> · <a href="videos/${esc(c.id)}/hand_timeline.csv">hand_timeline.csv</a> · <a href="videos/${esc(c.id)}/summary.json">summary.json</a></p></div>
+      <div class="tablewrap"><table class="tests"><thead><tr><th>Group</th><th>Test</th><th>Value</th><th>Threshold</th><th>Result</th><th>Detail</th></tr></thead><tbody>${rowsT}</tbody></table></div></div>`;
+  }
+  el.innerHTML = body; el.classList.add("open"); el.scrollIntoView({behavior: "smooth", block: "start"});
+}
+document.getElementById("defs").innerHTML = DATA.definitions.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("");
+render();
+// open a clip directly with qc_report.html#<clip_id>
+const fromHash = () => {
+  const id = decodeURIComponent(location.hash.slice(1));
+  const c = DATA.clips.find(x => x.id === id);
+  if (c) showDetail(c);
+};
+window.addEventListener("hashchange", fromHash);
+fromHash();
+</script>
+</body>
+</html>

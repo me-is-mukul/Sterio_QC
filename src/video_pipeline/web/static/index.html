@@ -113,7 +113,11 @@ async function loadRun() {
     const [ov, samples] = await Promise.all([getJSON(`/api/runs/${S.name}`), getJSON(`/api/runs/${S.name}/samples`)]);
     S.ov = ov; S.samples = samples;
     render();
-    $("#updated").textContent = `updated ${new Date().toLocaleTimeString()}`;
+    const r = ov.run;
+    const when = (iso) => iso ? new Date(iso).toLocaleString() : "?";
+    $("#updated").textContent = r.status === "running"
+      ? `run ${r.run_id} in progress · started ${when(r.created_at)} · live`
+      : `saved result of run ${r.run_id} · finished ${when(r.finished_at || r.updated_at)}`;
   } catch (e) { $("#app").innerHTML = `<div class="empty">Could not load run (${esc(e.message)}).</div>`; }
   if (S.ov && S.ov.run.status === "running") S.timer = setTimeout(loadRun, 3000);
 }

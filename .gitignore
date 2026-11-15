@@ -1,30 +1,56 @@
+# ---------------------------------------------------------------------------
 # Python
+# ---------------------------------------------------------------------------
 __pycache__/
 *.py[cod]
 *.egg-info/
 build/
 dist/
+.pytest_cache/
 
-# Environments / secrets
+# ---------------------------------------------------------------------------
+# Local environments and secrets (machine-specific; never commit)
+# ---------------------------------------------------------------------------
 venv/
 .venv/
+env/
 .env
+.env.*
+!.env.example
 
-# Generated pipeline artifacts
+# ---------------------------------------------------------------------------
+# Videos and generated data (large, reproducible from the scripts)
+# ---------------------------------------------------------------------------
+# Source videos placed in the project root / Docker volume
+/*.mp4
+/*.MP4
+/*.mov
+/*.MOV
+/videos/
+*.part
+*.tmp
+
+# Stereo HOI pipeline outputs
 output/*
 !output/.gitkeep
 
-# Videos for the Docker deployment
-videos/
+# Hand QC: downloaded source videos and generated results (re-create with run_hand_qc.py)
+hand_qc_cache/
+hand_qc/results/
 
-# Source videos downloaded into the project root
-/*.mp4
-/*.MP4
-/*.part
+# Logs
+*.log
+logs/
 
-# Editors / OS
+# ---------------------------------------------------------------------------
+# Notebooks, editors, OS, local tool settings
+# ---------------------------------------------------------------------------
+*.ipynb
+.ipynb_checkpoints/
 .vscode/
 .idea/
+.claude/settings.local.json
 .DS_Store
 Thumbs.db
-.ipynb_checkpoints/
+desktop.ini
+confidential_folder/
