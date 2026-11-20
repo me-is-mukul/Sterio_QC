@@ -11,8 +11,8 @@
 # =====================================================================================
 
 paths:                                  # relative paths are relative to the hand_qc folder
-  results_dir: results                  # one sub-folder per clip list: results/<name>/
-  cache_dir: ../hand_qc_cache           # downloaded source videos (large; NOT part of the deliverable)
+  outputs_dir: outputs                  # results, one sub-folder per clip list: outputs/<name>/
+  videos_dir: videos                    # downloaded source videos (large; shared by all clip lists)
   model: models/hand_landmarker.task    # MediaPipe Hand Landmarker (float16, v1)
 
 tools:

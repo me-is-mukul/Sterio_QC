@@ -13,12 +13,12 @@ Everything runs locally with open-source tools (Google MediaPipe Hand Landmarker
 are no cloud services and no AI language models, and the same inputs and settings always give the
 same results.
 
-Each clip list (CSV) gets its own results folder, `results/<name>/`, where `<name>` is the CSV file
-name.
+Each clip list (CSV) gets its own results folder, `outputs/<name>/`, where `<name>` is the CSV file
+name. Downloaded videos are kept in `videos/`, shared by all clip lists.
 
 > **Quick start** (from the repository root, after `pip install -r hand_qc/requirements.txt`):
-> `cd hand_qc` then `python run_hand_qc.py --csv ../egocentric_sample_clips.csv --workers 4`.
-> `results/` is not stored in the git repository; it is created by the first run.
+> `cd hand_qc` then `python run_hand_qc.py --csv <file path> --workers 4`.
+> `videos/` and `outputs/` are not stored in the git repository; the first run creates them.
 
 ---
 
@@ -56,7 +56,7 @@ results in both lists.
 
 ## Open the results
 
-For each clip list, in `results/<name>/`:
+For each clip list, in `outputs/<name>/`:
 
 | File | What it is |
 |---|---|
@@ -84,9 +84,9 @@ hand_qc/
 ├── models/hand_landmarker.task       MediaPipe hand model (Apache-2.0)
 ├── handqc/                    the Python package (sources, analysis, scoring, reports)
 ├── docs/                      methodology and data formats
-└── results/
-    ├── egocentric_sample_clips/       one folder per clip list (see above)
-    └── stereo_sixcam_sample_clips/
+├── clip_lists/                put clip lists here (example_clip_list.csv shows the format)
+├── videos/                    downloaded source videos (created by the first run)
+└── outputs/<clip list name>/  results, one folder per clip list (see above)
 ```
 
 ---
@@ -101,6 +101,9 @@ One row per clip, with a header row:
 | `Category`, `Task`, `Camera` | Free text, copied to the checklist (`Task` may be empty) |
 | `URL_or_File` | `https://storage.googleapis.com/<bucket>/<path>`, `gs://<bucket>/<path>`, or empty |
 | `Notes` | Free text |
+
+See [`clip_lists/example_clip_list.csv`](clip_lists/example_clip_list.csv). Real clip lists placed
+in `clip_lists/` are git-ignored, because they contain private links.
 
 Links to public Google Cloud Storage buckets are checked against the bucket listing. Truncated file
 names or missing date folders are repaired only when exactly one file matches. Rows that can't be
@@ -117,21 +120,21 @@ resolved are listed as `SOURCE MISSING` and are not analysed.
   `winget install Gyan.FFmpeg`. On Ubuntu: `sudo apt install ffmpeg`. On macOS: `brew install ffmpeg`.
 
 ```bash
+python -m venv venv
+# Windows:  venv\Scripts\activate        macOS/Linux:  source venv/bin/activate
+python -m pip install -r hand_qc/requirements.txt
 cd hand_qc
-python -m venv .venv
-# Windows:  .venv\Scripts\activate        macOS/Linux:  source .venv/bin/activate
-python -m pip install -r requirements.txt
 ```
 
 ### 2. Run
 
 ```bash
-python run_hand_qc.py --csv path/to/my_clips.csv
+python run_hand_qc.py --csv clip_lists/my_clips.csv
 ```
 
-This downloads the clips into `../hand_qc_cache/` (outside this folder; each file is verified
-against its size and MD5, and shared between clip lists), analyses them, and writes
-`results/my_clips/`. On an 8-core laptop with `--workers 4`, about 2 hours of video took about
+This downloads the clips into `videos/` (each file is verified against its size and MD5, and shared
+between clip lists), analyses them, and writes `outputs/my_clips/`. When zipping this folder for
+someone else, leave out `videos/` (it can be tens of GB). On an 8-core laptop with `--workers 4`, about 2 hours of video took about
 1 hour. Finished work is kept: if the run stops, run the same command again and it resumes. Every
 run re-scores all analysed clips of that list with the current settings, so a checklist never mixes
 thresholds.

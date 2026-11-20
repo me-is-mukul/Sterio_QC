@@ -1,0 +1,55 @@
+# Single-host deployment: dashboard + one-off pipeline runs (+ optional Ollama for --detector vlm).
+#
+#   docker compose up -d --build dashboard
+#   docker compose run --rm pipeline --input <video file> --waste-threshold 5
+#   open http://<host>:8000
+#
+# Optional vision-language model (GPU):
+#   docker compose --profile vlm up -d ollama
+#   docker compose exec ollama ollama pull qwen3-vl:4b
+#   docker compose run --rm pipeline --input <video file> --detector vlm
+#
+# Videos go in ./videos, results appear in ./outputs/<video name>/. See docs/guide.md.
+
+services:
+  dashboard:
+    build: .
+    image: stereo-hoi-pipeline:0.5.0
+    restart: unless-stopped
+    command: ["python", "scripts/serve_ui.py", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./outputs:/app/outputs:ro
+      - ./videos:/app/videos:ro        # frames are rendered from the source video on demand
+
+  pipeline:
+    image: stereo-hoi-pipeline:0.5.0
+    build: .
+    profiles: ["run"]          # not started by `up`; use `docker compose run --rm pipeline ...`
+    entrypoint: ["python", "scripts/run_pipeline.py"]
+    environment:               # used only with --detector vlm / --verify-with vlm
+      INFERENCE_PROVIDER: ollama
+      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3-vl:4b}
+    volumes:
+      - ./videos:/app/videos
+      - ./outputs:/app/outputs
+
+  ollama:
+    image: ollama/ollama:0.32.0
+    profiles: ["vlm"]
+    restart: unless-stopped
+    volumes:
+      - ollama-models:/root/.ollama
+    # Not published: only the pipeline container talks to Ollama.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  ollama-models:

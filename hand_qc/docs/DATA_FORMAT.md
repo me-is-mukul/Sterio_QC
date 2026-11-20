@@ -1,10 +1,10 @@
 # Output files
 
-Each clip list gets its own folder, `results/<name>/`, where `<name>` is the CSV file name (or the
+Each clip list gets its own folder, `outputs/<name>/`, where `<name>` is the CSV file name (or the
 `--name` value).
 
 ```text
-results/<name>/
+outputs/<name>/
 ├── source_list.csv          the clip list as received
 ├── qc_checklist.xlsx        the checklist: one row per clip, every metric, PASS/FAIL per test (+ Summary,
 │                            Thresholds and Definitions sheets)

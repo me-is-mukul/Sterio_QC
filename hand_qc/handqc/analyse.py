@@ -1,6 +1,6 @@
 """Per-clip analysis (the expensive part): one decode pass, hand tracking, picture metrics.
 
-Writes raw, threshold-free measurements to results/videos/<clip_id>/analysis/ :
+Writes raw, threshold-free measurements to outputs/<name>/videos/<clip_id>/analysis/ :
   analysis.json          metadata, settings fingerprint, decode summary
   frames.csv.gz          one row per analysed frame per camera view: picture metrics
   detections.csv.gz      one row per detected hand: 21 landmarks (x, y px) + features

@@ -1,0 +1,7 @@
+# Runtime dependencies. Keep in sync with pyproject.toml.
+# External tools required on PATH (or configured in configs/default.yaml -> tools):
+#   ffmpeg, ffprobe
+PyYAML>=6.0
+mediapipe==1.2.3                 # default HOI detector (hand landmarks); installs numpy + OpenCV
+opencv-contrib-python==5.0.0.93
+numpy==2.5.4

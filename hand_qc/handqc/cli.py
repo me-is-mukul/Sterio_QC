@@ -165,7 +165,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="run_hand_qc.py",
         description="Hand & technical QC checklist for the clips listed in a CSV file. Each clip list gets its own "
-                    "results folder: results/<name>/ (name = CSV file name unless --name is given).")
+                    "results folder: outputs/<name>/ (name = CSV file name unless --name is given).")
     parser.add_argument("--csv", type=Path, required=True,
                         help="clip list CSV (columns: Dataset, Category, Task, Camera, URL_or_File, Notes)")
     parser.add_argument("--name", help="results folder name (default: the CSV file name without .csv)")
@@ -194,7 +194,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     dataset = args.name or csv_path.stem
-    results = _dataset_dir(resolve_path(config, "results_dir"), dataset)
+    results = _dataset_dir(resolve_path(config, "outputs_dir"), dataset)
     videos_dir = results / "videos"
     setup_logging(args.log_level, results / "logs" / f"run_{dt.datetime.now():%Y%m%d_%H%M%S}.log")
     started = time.monotonic()
@@ -269,7 +269,7 @@ def main(argv: list[str] | None = None) -> int:
 
 def _download_and_analyse(todo: list[Clip], full: dict[str, bool], config: dict, videos_dir: Path, model: Path,
                           model_sha: str, level: str) -> dict[str, str]:
-    cache = resolve_path(config, "cache_dir")
+    cache = resolve_path(config, "videos_dir")
     d = config["download"]
     errors: dict[str, str] = {}
     workers = int(config["analysis"]["workers"])

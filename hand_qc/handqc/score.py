@@ -1,7 +1,7 @@
 """Scoring: turn one clip's raw analysis into metrics, PASS/FAIL tests and deliverable files.
 
 Fast and deterministic; re-run after any threshold change.
-Writes into results/videos/<clip_id>/ :
+Writes into outputs/<name>/videos/<clip_id>/ :
   summary.json        every metric, every test (value, threshold, verdict) and the overall verdict
   landmarks.csv       per analysed frame and detected hand: role, hand, grasp flag, 21 landmarks (x, y px)
   hand_timeline.csv   per analysed frame: left/right/either/both present, grasping, HOI, other hands

@@ -1,6 +1,6 @@
 """Hand & technical QC checklist - entry point.
 
-    python run_hand_qc.py --csv ../my_clips.csv                # download, analyse, score -> results/my_clips/
+    python run_hand_qc.py --csv ../my_clips.csv                # download, analyse, score -> outputs/my_clips/
     python run_hand_qc.py --csv ../my_clips.csv --score-only   # re-score after changing thresholds (seconds)
     python run_hand_qc.py --help                               # all options
 

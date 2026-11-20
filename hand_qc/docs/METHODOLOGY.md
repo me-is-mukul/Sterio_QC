@@ -17,7 +17,7 @@ ffprobe metadata ──► ONE FFmpeg decode of every frame ──┬─► ever
                                                         └─► decoder error messages
 second decode: 2 full-resolution grey frames/s ──► visible block edges (graded blockiness)
       ▼
-raw analysis (results/videos/<clip>/analysis/)  ──►  scoring with the thresholds  ──►  checklist + reports
+raw analysis (outputs/<name>/videos/<clip>/analysis/)  ──►  scoring with the thresholds  ──►  checklist + reports
 ```
 
 The expensive analysis is stored raw and threshold-free. Scoring is a separate, deterministic
@@ -27,7 +27,7 @@ in seconds without decoding any video again.
 ## 2. Inputs
 
 Each clip list is a CSV passed with `--csv` (format: see README). At the start of a run it is copied
-to `results/<name>/source_list.csv` and resolved into `results/<name>/clip_manifest.csv` by matching
+to `outputs/<name>/source_list.csv` and resolved into `outputs/<name>/clip_manifest.csv` by matching
 each row against the public bucket listings. `https://storage.googleapis.com/…` and `gs://…` links
 are both accepted. Resolution runs again only when the CSV changes, or with `--refresh-sources`.
 `Dataset` decides the camera layout: `Mono` = full frame, `Stereo` = side by side, `Six-Cam` = 3×2
@@ -188,7 +188,7 @@ failed (the reason is in the checklist).
 * Each clip's `analysis/analysis.json` records the probe, the analysis settings fingerprint, the
   software versions and the decode summary. Analysis is redone automatically only when the settings,
   model or source file change.
-* `results/config_used.yaml` and `results/run_info.json` record the exact settings and versions of
+* `outputs/<name>/config_used.yaml` and `outputs/<name>/run_info.json` record the exact settings and versions of
   the last run.
 * There are no network services or AI language models involved. Everything runs locally from the
   scripts in this folder.

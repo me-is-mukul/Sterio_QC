@@ -1,0 +1,4 @@
+Dataset,Category,Task,Camera,URL_or_File,Notes
+Mono,<category>,<task>,,https://storage.googleapis.com/<bucket>/<path>.mp4,
+Stereo,<category>,<task>,<camera>,gs://<bucket>/<path>.mp4,
+Six-Cam,<category>,,<camera>,gs://<bucket>/<path>.mp4,<notes>

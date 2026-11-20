@@ -21,22 +21,25 @@ env/
 # ---------------------------------------------------------------------------
 # Videos and generated data (large, reproducible from the scripts)
 # ---------------------------------------------------------------------------
-# Source videos placed in the project root / Docker volume
-/*.mp4
-/*.MP4
-/*.mov
-/*.MOV
-/videos/
+# Each module keeps its input videos in videos/ and its results in outputs/.
+*.mp4
+*.MP4
+*.mov
+*.MOV
 *.part
 *.tmp
 
-# Stereo HOI pipeline outputs
-output/*
-!output/.gitkeep
+# Stereo HOI pipeline
+stereo_hoi_pipeline/videos/*
+!stereo_hoi_pipeline/videos/.gitkeep
+stereo_hoi_pipeline/outputs/*
+!stereo_hoi_pipeline/outputs/.gitkeep
 
-# Hand QC: downloaded source videos and generated results (re-create with run_hand_qc.py)
-hand_qc_cache/
-hand_qc/results/
+# Hand QC: downloaded videos, results, and real clip lists (they contain private links)
+hand_qc/videos/
+hand_qc/outputs/
+hand_qc/clip_lists/*.csv
+!hand_qc/clip_lists/example_clip_list.csv
 
 # Logs
 *.log

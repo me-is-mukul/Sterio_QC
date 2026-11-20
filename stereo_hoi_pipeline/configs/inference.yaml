@@ -1,0 +1,56 @@
+# HOI detection: how each sampled stereo pair is classified (RELEVANT / WASTE / UNCERTAIN).
+#   mediapipe  (default) hand landmarks + grasp rules. Runs locally, no AI language model,
+#              ~0.1 s per stereo pair on a CPU. CLI: --detector mediapipe
+#   vlm        a vision-language model (Qwen-VL) through the `inference:` section below.
+#              CLI: --detector vlm
+detection:
+  method: mediapipe
+  mediapipe:
+    model_path: models/hand_landmarker.task   # relative to this folder; downloaded automatically if missing
+    num_hands: 4                              # > 2 so that other people's hands are recognised as such
+    min_hand_detection_confidence: 0.5
+    min_hand_presence_confidence: 0.5
+    # Camera wearer's hands vs other people's (hand size = landmark box diagonal / view height)
+    min_hand_size: 0.08                       # smaller = far away = someone else's
+    max_pointing_down: 0.5                    # pointing down the frame (towards the camera) ...
+    large_hand_size: 0.175                    # ... and smaller than this = someone else's
+    duplicate_overlap: 0.6                    # same hand detected twice
+    # Grasp (= hand-object interaction) from the 3D hand shape
+    power_curl_deg: 120                       # mean finger curl at/above = power grasp
+    pinch_ratio: 0.40                         # thumb-to-finger distance / palm length at/below = precision grasp
+    # Label for samples where the wearer's hands are visible but not grasping:
+    #   UNCERTAIN (default, kept: pressing/pushing is not a grasp) | WASTE | RELEVANT
+    hands_without_grasp: UNCERTAIN
+
+# Vision-language model (used only with detection.method: vlm).
+#
+# Default: Ollama (local, or exposed through ngrok). Set in .env:
+#   OLLAMA_BASE_URL   e.g. http://localhost:11434 or https://<name>.ngrok-free.dev
+#   OLLAMA_MODEL      e.g. qwen3-vl:4b
+#   OLLAMA_API_KEY    optional Bearer token
+# Alternative: INFERENCE_PROVIDER=openai_compatible with VLLM_BASE_URL / VLLM_MODEL /
+# VLLM_API_KEY (vLLM or a hosted OpenAI-compatible API). Only the selected provider's
+# variables are applied. API keys are never stored.
+
+inference:
+  provider: ollama
+  base_url: http://localhost:11434
+  model: qwen3-vl:4b
+  timeout_seconds: 180
+  max_retries: 3
+  retry_backoff_seconds: 2
+  temperature: 0.1
+  # Qwen3 "thinking" mode. false = answer directly (faster). null = model default.
+  think: false
+  # Upper bound on generated tokens per pair (the JSON answer is ~150-300 tokens).
+  max_output_tokens: 1024
+  # Ollama: how long the model stays loaded between requests.
+  keep_alive: 10m
+  # Sequential requests only.
+  max_concurrency: 1
+  # Selects the prompt template in inference/prompts.py. Changing it invalidates the cache.
+  prompt_version: hoi-stereo-v1
+  # What a failed request becomes. Never WASTE.
+  #   uncertain   -> UNCERTAIN (preserved)
+  #   unavailable -> UNAVAILABLE (preserved, reported separately)
+  failure_policy: uncertain

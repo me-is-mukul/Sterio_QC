@@ -1,4 +1,4 @@
-"""The resolved clip list (results/<name>/clip_manifest.csv), built by sources.py."""
+"""The resolved clip list (outputs/<name>/clip_manifest.csv), built by sources.py."""
 
 from __future__ import annotations
 
