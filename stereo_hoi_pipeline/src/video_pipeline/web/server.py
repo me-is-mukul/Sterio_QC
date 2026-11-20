@@ -94,7 +94,13 @@ class Dashboard:
         source = self.source_video(ws)
         if source is None:
             return None
-        cmd = [self.ffmpeg, "-v", "error", "-nostdin", "-ss", f"{max(0.0, t - 0.001):.4f}", "-i", str(source),
+        info = _read_json(ws / "metadata" / "video_info.json") or {}
+        stream = next((v for v in info.get("video_streams", [])
+                       if v.get("index") == info.get("primary_video_stream_index")), {})
+        video_start = stream.get("start_time_seconds") or (info.get("format") or {}).get("start_time_seconds") or 0.0
+        offset = float(video_start) - float((info.get("format") or {}).get("start_time_seconds") or 0.0)
+        seek = max(0.0, t + offset - 0.001)    # -ss lands at container time seek + container start
+        cmd = [self.ffmpeg, "-v", "error", "-nostdin", "-ss", f"{seek:.4f}", "-i", str(source),
                "-frames:v", "1", "-vf", f"scale=w='min({width},iw)':h=-2", "-q:v", "4",
                "-f", "image2pipe", "-vcodec", "mjpeg", "-"]
         try:

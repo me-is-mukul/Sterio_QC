@@ -53,10 +53,15 @@ def expected_samples(window_start: float, window_end: float, interval: float) ->
 
 def build_command(ffmpeg: str, video: Path, geometry: StereoGeometry, *, interval: float, video_start: float,
                   window_start: float, window_end: float, max_width: int, jpeg_quality: int,
-                  left_pattern: Path, right_pattern: Path) -> tuple[list[str], float]:
-    """Return (command, pts_offset) where container_time = frame pts + pts_offset."""
-    seek = video_start + window_start if window_start > 0 else None
-    pts_offset = seek or 0.0
+                  left_pattern: Path, right_pattern: Path, format_start: float = 0.0) -> tuple[list[str], float]:
+    """Return (command, pts_offset) where container_time = frame pts + pts_offset.
+
+    FFmpeg (without -copyts) subtracts the container start time from every timestamp, and
+    `-ss S` lands at container time S + format_start with the filter clock restarting at 0 there.
+    So a filter-graph time t is container time t + format_start + S.
+    """
+    seek = max(0.0, video_start + window_start - format_start) if window_start > 0 else None
+    pts_offset = format_start + (seek or 0.0)
     # Frame time relative to the window start, expressed in filter-graph pts seconds.
     c = pts_offset - video_start - window_start
     rel = f"(t+{c:.6f})"
@@ -87,7 +92,8 @@ def build_command(ffmpeg: str, video: Path, geometry: StereoGeometry, *, interva
 def sample_stereo_frames(ffmpeg: str, video: Path, geometry: StereoGeometry, *, interval: float,
                          video_start: float, window_start: float, window_end: float, max_width: int,
                          jpeg_quality: int, left_dir: Path, right_dir: Path, timeout_seconds: float,
-                         name_prefix: str = "") -> tuple[list[SampledFrame], list[int], CommandResult]:
+                         name_prefix: str = "", format_start: float = 0.0
+                         ) -> tuple[list[SampledFrame], list[int], CommandResult]:
     """Extract stereo pairs for one window into ``left_dir``/``right_dir``.
 
     Files are named ``<prefix><k:06d>.jpg``. Returns (frames, missing_sample_indices, command).
@@ -104,7 +110,8 @@ def sample_stereo_frames(ffmpeg: str, video: Path, geometry: StereoGeometry, *, 
         cmd, pts_offset = build_command(
             ffmpeg, video, geometry, interval=interval, video_start=video_start, window_start=window_start,
             window_end=window_end, max_width=max_width, jpeg_quality=jpeg_quality,
-            left_pattern=staging / "left" / "%06d.jpg", right_pattern=staging / "right" / "%06d.jpg")
+            left_pattern=staging / "left" / "%06d.jpg", right_pattern=staging / "right" / "%06d.jpg",
+            format_start=format_start)
         result = run_command(cmd, timeout_seconds=timeout_seconds)
         if result.returncode != 0:
             tail = "\n".join(result.stderr.strip().splitlines()[-5:])

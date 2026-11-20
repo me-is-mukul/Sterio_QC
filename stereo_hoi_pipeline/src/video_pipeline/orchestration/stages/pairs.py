@@ -25,7 +25,12 @@ from video_pipeline.inference.openai_compatible import OpenAICompatibleProvider
 from video_pipeline.inference.prompts import get_prompt
 from video_pipeline.inference.qwen_classifier import STATUS_OK, StereoHoiClassifier, failed_classification
 from video_pipeline.orchestration.context import RunContext
-from video_pipeline.orchestration.stages.base import load_video_info, primary_video_stream, video_start_time
+from video_pipeline.orchestration.stages.base import (
+    format_start_time,
+    load_video_info,
+    primary_video_stream,
+    video_start_time,
+)
 from video_pipeline.stereo.frame_sampler import SampledFrame, sample_stereo_frames
 from video_pipeline.stereo.stereo_splitter import StereoGeometry, compute_geometry
 
@@ -77,6 +82,7 @@ class PairExtractor:
         self._ctx = ctx
         self._ffmpeg = resolve_executable(ctx.config.get("tools.ffmpeg"))
         self._video_start = video_start_time(info)
+        self._format_start = format_start_time(info)
 
     def extract(self, *, window_start: float, window_end: float, interval: float, left_dir: Path, right_dir: Path,
                 prefix: str = "") -> tuple[list[SampledFrame], list[int], CommandResult]:
@@ -85,7 +91,8 @@ class PairExtractor:
             self._ffmpeg, self._ctx.source.path, self.geometry, interval=interval, video_start=self._video_start,
             window_start=window_start, window_end=window_end, max_width=cfg.get("sampling.max_width"),
             jpeg_quality=cfg.get("sampling.jpeg_quality"), left_dir=left_dir, right_dir=right_dir,
-            timeout_seconds=cfg.get("sampling.timeout_seconds"), name_prefix=prefix)
+            timeout_seconds=cfg.get("sampling.timeout_seconds"), name_prefix=prefix,
+            format_start=self._format_start)
 
 
 @dataclass

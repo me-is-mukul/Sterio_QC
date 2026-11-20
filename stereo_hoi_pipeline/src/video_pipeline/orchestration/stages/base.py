@@ -62,6 +62,22 @@ def primary_video_stream(info: Mapping[str, Any]) -> dict[str, Any]:
     raise StageInputError("video_info.json has no primary video stream.")
 
 
+def format_start_time(info: Mapping[str, Any]) -> float:
+    """Container start time (the earliest stream). FFmpeg subtracts it from every input timestamp,
+    and an input seek `-ss X` lands at container time X + this value."""
+    value = (info.get("format") or {}).get("start_time_seconds")
+    return float(value) if value is not None else 0.0
+
+
+def ffmpeg_time_offset(info: Mapping[str, Any]) -> float:
+    """FFmpeg input time of the first video frame (= video start - container start).
+
+    "t seconds from the video start" is FFmpeg time `t + ffmpeg_time_offset`, for `-ss` and for
+    filter timestamps (trim/select) alike.
+    """
+    return video_start_time(info) - format_start_time(info)
+
+
 def video_start_time(info: Mapping[str, Any]) -> float:
     """Timestamp of the first video frame on the container timeline (usually 0)."""
     stream = primary_video_stream(info)

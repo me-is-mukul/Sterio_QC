@@ -31,9 +31,12 @@
   .kpi .s { color: var(--muted); font-size: 12px; margin-top: 2px; }
   .legend { display: flex; gap: 14px; flex-wrap: wrap; color: var(--muted); font-size: 12px; margin-bottom: 10px; }
   .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
-  .track { position: relative; height: 44px; display: flex; border-radius: 6px; overflow: hidden; background: var(--pending); cursor: pointer; }
-  .cell { height: 100%; border-right: 1px solid color-mix(in srgb, var(--card) 40%, transparent); }
-  .cell.sel { outline: 2px solid var(--text); outline-offset: -2px; z-index: 2; }
+  /* nothing may make the page wider than the window (long videos have thousands of samples) */
+  main > *, .grid2 > *, .card, .kpis > *, .hk > * { min-width: 0; }
+  .track { position: relative; height: 44px; border-radius: 6px; overflow: hidden; background: var(--pending); cursor: pointer; }
+  .seg { position: absolute; top: 0; bottom: 0; box-shadow: inset -1px 0 0 color-mix(in srgb, var(--card) 40%, transparent); }
+  .lane .seg { box-shadow: none; }
+  .selmark { position: absolute; top: 0; bottom: 0; min-width: 3px; outline: 2px solid var(--text); outline-offset: -2px; z-index: 3; pointer-events: none; }
   .removed { position: absolute; top: 0; bottom: 0; pointer-events: none;
     background: repeating-linear-gradient(135deg, rgba(0,0,0,.35) 0 4px, transparent 4px 8px); border-left: 2px solid #000; border-right: 2px solid #000; }
   .axis, .chapters { position: relative; height: 18px; font-size: 11px; color: var(--muted); }
@@ -69,9 +72,9 @@
         padding: 2px 6px; border-radius: 4px; color: #fff; background: var(--na); }
   .qs.pass { background: var(--rel); } .qs.warn { background: var(--unc); } .qs.fail { background: var(--waste); }
   .cand { position: absolute; top: -3px; bottom: -3px; border: 2px dashed var(--text); border-radius: 4px; pointer-events: none; opacity: .55; }
-  .lanes { margin-top: 6px; display: grid; grid-template-columns: 74px 1fr; gap: 3px 8px; align-items: center; font-size: 11px; color: var(--muted); }
-  .lane { position: relative; height: 12px; display: flex; border-radius: 3px; overflow: hidden; background: var(--pending); }
-  .lane > div { height: 100%; }
+  /* timeline, hand lanes and time axis share one grid so they line up in time */
+  .tl { display: grid; grid-template-columns: 74px minmax(0, 1fr); gap: 4px 8px; align-items: center; font-size: 11px; color: var(--muted); }
+  .lane { position: relative; height: 12px; border-radius: 3px; overflow: hidden; background: var(--pending); }
   .frame { position: relative; }
   .frame img { width: 100%; display: block; border-radius: 6px; background: #000; }
   .frame canvas { position: absolute; left: 0; top: 0; pointer-events: none; }
@@ -170,19 +173,30 @@ function render() {
     ["Other people's hands", arrow(hb.other_hands_pct, ha.other_hands_pct, pct), "share of samples"],
   ] : [];
 
-  const cells = S.samples.map((s, i) => {
-    const w = ((Math.min(s.t + (ov.sampling?.interval_seconds || 1), dur) - s.t) / dur) * 100;
-    return `<div class="cell ${i === S.sel ? "sel" : ""}" data-i="${i}" style="width:${w}%;background:${COLORS[s.label] || "var(--pending)"}" title="${fmtT(s.t)} · ${esc(s.label || "pending")}"></div>`;
-  }).join("");
+  const iv = ov.sampling?.interval_seconds || 1;
+  // Consecutive samples with the same colour become ONE block, absolutely positioned by time,
+  // so long or densely sampled videos (thousands of samples) never widen the page.
+  const runs = (colorOf, titleOf) => {
+    const out = [];
+    S.samples.forEach((x) => {
+      const c = colorOf(x), end = Math.min(x.t + iv, dur), last = out[out.length - 1];
+      if (last && last.c === c && Math.abs(last.end - x.t) < iv * 0.51) last.end = end;
+      else out.push({ c, start: x.t, end, title: titleOf ? titleOf(x) : "" });
+    });
+    return out.map((r) => `<div class="seg" style="left:${(r.start / dur) * 100}%;width:${((r.end - r.start) / dur) * 100}%;background:${r.c}"
+      title="${fmtT(r.start)}–${fmtT(r.end)}${r.title ? " · " + esc(r.title) : ""}"></div>`).join("");
+  };
+  const cells = dur ? runs((x) => COLORS[x.label] || "var(--pending)", (x) => x.label || "pending") : "";
+  const selS = S.samples[S.sel];
+  const selMark = selS && dur ? `<div class="selmark" style="left:${(selS.t / dur) * 100}%;width:${(iv / dur) * 100}%"></div>` : "";
   const overlays = removed.map((iv) => `<div class="removed" style="left:${(iv.start / dur) * 100}%;width:${((iv.end - iv.start) / dur) * 100}%"></div>`).join("")
     + (ov.verification?.candidates || []).filter((c) => c.outcome !== "removed").map((c) =>
-      `<div class="cand" title="candidate ${c.outcome.replace("_", " ")} after verification" style="left:${(c.candidate.start / dur) * 100}%;width:${(c.candidate.duration / dur) * 100}%"></div>`).join("");
-  const iv = ov.sampling?.interval_seconds || 1;
-  const lane = (side) => S.samples.map((x) => {
-    const w = ((Math.min(x.t + iv, dur) - x.t) / dur) * 100, h = x.hand_summary;
-    const c = !h ? "var(--pending)" : h[`grasp_${side}`] ? "var(--grasp)" : h[side] ? "var(--hand)" : "var(--pending)";
-    return `<div style="width:${w}%;background:${c}"></div>`;
-  }).join("");
+      `<div class="cand" title="candidate ${c.outcome.replace("_", " ")} after verification" style="left:${(c.candidate.start / dur) * 100}%;width:${(c.candidate.duration / dur) * 100}%"></div>`).join("")
+    + selMark;
+  const lane = (side) => dur ? runs((x) => {
+    const h = x.hand_summary;
+    return !h ? "var(--pending)" : h[`grasp_${side}`] ? "var(--grasp)" : h[side] ? "var(--hand)" : "var(--pending)";
+  }) : "";
   const hasHands = S.samples.some((x) => x.hand_summary);
   const step = dur > 600 ? 120 : dur > 240 ? 60 : 30;
   let ticks = ""; for (let t = 0; t <= dur; t += step) ticks += `<span style="left:${(t / dur) * 100}%">${fmtT(t).replace(/\.0$/, "")}</span>`;
@@ -215,12 +229,14 @@ function render() {
         <span><i style="background:repeating-linear-gradient(135deg,#555 0 3px,transparent 3px 6px);border:1px solid #000"></i>Removed (≥ ${ov.config.waste_threshold_seconds}s of verified waste)</span>
         <span><i style="border:2px dashed var(--text);background:none"></i>Candidate kept/trimmed by verification</span>
       </div>
-      <div class="track" id="track">${cells}${overlays}</div>
-      ${hasHands ? `<div class="lanes"><span>Left hand</span><div class="lane">${lane("left")}</div>
-        <span>Right hand</span><div class="lane">${lane("right")}</div></div>
-        <div class="legend" style="margin:6px 0 0 82px"><span><i style="background:var(--grasp)"></i>grasping</span><span><i style="background:var(--hand)"></i>visible</span><span><i style="background:var(--pending)"></i>not detected</span></div>` : ""}
-      <div class="axis">${ticks}</div>
-      ${chapters ? `<div class="chapters">${chapters}</div>` : ""}
+      <div class="tl">
+        <span>HOI</span><div class="track" id="track">${cells}${overlays}</div>
+        ${hasHands ? `<span>Left hand</span><div class="lane">${lane("left")}</div>
+          <span>Right hand</span><div class="lane">${lane("right")}</div>` : ""}
+        <span></span><div class="axis">${ticks}</div>
+        ${chapters ? `<span></span><div class="chapters">${chapters}</div>` : ""}
+      </div>
+      ${hasHands ? `<div class="legend" style="margin:8px 0 0 82px"><span>Hand lanes:</span><span><i style="background:var(--grasp)"></i>grasping</span><span><i style="background:var(--hand)"></i>visible</span><span><i style="background:var(--pending)"></i>not detected</span></div>` : ""}
     </section>
     <section class="grid2">
       <div class="card">
@@ -303,7 +319,12 @@ function render() {
       </div>
     </section>`;
 
-  $("#track")?.addEventListener("click", (e) => { const i = e.target.dataset?.i; if (i != null) { S.sel = +i; render(); } });
+  $("#track")?.addEventListener("click", (e) => {   // click position -> the sample covering that time
+    const r = e.currentTarget.getBoundingClientRect(), t = ((e.clientX - r.left) / r.width) * dur;
+    let i = 0;
+    for (let k = 0; k < S.samples.length && S.samples[k].t <= t; k++) i = k;
+    if (S.samples.length) { S.sel = i; render(); }
+  });
   $("#prev")?.addEventListener("click", () => move(-1));
   $("#next")?.addEventListener("click", () => move(1));
   $("#seek")?.addEventListener("click", () => { const v = $("#vid"); if (v) { v.currentTime = ptime; v.play(); v.scrollIntoView({ block: "nearest" }); } });

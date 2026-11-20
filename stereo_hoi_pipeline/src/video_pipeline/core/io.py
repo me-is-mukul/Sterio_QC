@@ -7,6 +7,7 @@ import io
 import json
 import os
 import tempfile
+import time
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,6 +27,23 @@ def utc_now_iso() -> str:
     return to_iso(utc_now())
 
 
+def replace_with_retry(src: str | Path, dst: Path, attempts: int = 40, delay: float = 0.05) -> None:
+    """os.replace that tolerates brief locks on Windows.
+
+    On Windows the rename fails with PermissionError (WinError 5/32) while another process has the
+    target open, e.g. the dashboard reading manifest.json during a live run, or an antivirus scan.
+    Such locks last milliseconds, so retry for up to ~4 s before giving up.
+    """
+    for attempt in range(attempts):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(min(delay * (attempt + 1), 0.25))
+
+
 def write_text_atomic(path: Path, text: str) -> None:
     """Write text via a temporary file + rename so readers never see partial files."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -33,7 +51,7 @@ def write_text_atomic(path: Path, text: str) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
             handle.write(text)
-        os.replace(tmp_name, path)
+        replace_with_retry(tmp_name, path)
     except BaseException:
         Path(tmp_name).unlink(missing_ok=True)
         raise

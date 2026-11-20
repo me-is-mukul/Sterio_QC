@@ -17,6 +17,7 @@ from video_pipeline.orchestration.context import RunContext
 from video_pipeline.orchestration.stages.base import (
     Stage,
     StageOutcome,
+    ffmpeg_time_offset,
     load_video_info,
     primary_video_stream,
     require,
@@ -117,11 +118,12 @@ class QualityCheckStage(Stage):
             half = frame / 2
             points = alignment_checkpoints(processing["retained_segments"], cfg.get("qc.alignment_checkpoints_max"))
             measured, off_by_one = [], 0
+            source_offset = ffmpeg_time_offset(info)   # original time -> FFmpeg seek time
             for p, o in points:
                 # Snap to the nominal frame grid so (t - half) is always half a frame from any frame time.
                 p, o = round(p * fps) / fps, round(o * fps) / fps
                 psnr_at = lambda shift: frame_psnr(ffmpeg, output, max(0.0, p - half), ctx.source.path,  # noqa: E731
-                                                   max(0.0, o - half + shift * frame), timeout)
+                                                   max(0.0, o + source_offset - half + shift * frame), timeout)
                 db, offset = psnr_at(0), 0
                 if db is None or db < min_db:  # distinguish a 1-frame slip from real misalignment
                     for cand in (-1, 1):

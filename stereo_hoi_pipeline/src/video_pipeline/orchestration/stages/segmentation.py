@@ -12,8 +12,8 @@ from video_pipeline.orchestration.stages.base import (
     StageOutcome,
     load_video_info,
     require,
+    ffmpeg_time_offset,
     video_duration,
-    video_start_time,
 )
 from video_pipeline.segmentation.video_cutter import EncoderSettings, build_processing_timeline, cut_video
 
@@ -50,7 +50,7 @@ class SegmentationStage(Stage):
             ctx.logger.info("Encoding %d retained segment(s) (%.1fs of %.1fs) with %s...",
                             len(retained), nominal, duration, settings.video_encoder)
             result = cut_video(resolve_executable(ctx.config.get("tools.ffmpeg")), ctx.source.path, retained, output,
-                               start_offset=video_start_time(info), include_audio=include_audio, settings=settings,
+                               start_offset=ffmpeg_time_offset(info), include_audio=include_audio, settings=settings,
                                timeout_seconds=ctx.config.get("segmentation.timeout_seconds"))
             command_record = result.to_record()
             ctx.manifest.record_command(self.name, command_record)

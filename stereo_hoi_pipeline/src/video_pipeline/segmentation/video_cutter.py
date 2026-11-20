@@ -15,6 +15,7 @@ from typing import Any
 
 from video_pipeline.analysis.temporal_filter import Interval
 from video_pipeline.core.errors import SegmentationError
+from video_pipeline.core.io import replace_with_retry
 from video_pipeline.core.tools import CommandResult, run_command
 
 
@@ -80,5 +81,12 @@ def cut_video(ffmpeg: str, video: Path, retained: Sequence[Interval], output: Pa
         tmp.unlink(missing_ok=True)
         tail = "\n".join(result.stderr.strip().splitlines()[-5:])
         raise SegmentationError(f"FFmpeg cutting failed (exit {result.returncode}): {tail}")
-    tmp.replace(output)
+    try:
+        # the dashboard may be streaming the previous processed video: wait up to ~30 s for it
+        replace_with_retry(tmp, output, attempts=150, delay=0.2)
+    except PermissionError as exc:
+        raise SegmentationError(
+            f"Cannot replace '{output.name}': it is open in another program (e.g. the dashboard's video "
+            f"player or a media player). Close it or reload the dashboard page, then re-run with --resume. "
+            f"The new video is kept as '{tmp.name}'.") from exc
     return result
