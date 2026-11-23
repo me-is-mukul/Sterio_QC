@@ -41,6 +41,20 @@ Results are written to `stereo_hoi_pipeline/outputs/<video name>/`. Useful optio
 `--sample-fps <frames per second>`, `--verify-with vlm` and `--resume`. See
 [stereo_hoi_pipeline/README.md](stereo_hoi_pipeline/README.md).
 
+### Egocentric QA on MCAP recordings in Cloud Storage
+
+The QA pass/fail sheet (technical checks, stereo calibration, content screen, time cropping) for the
+MCAP recordings in `gs://op-datoric/raw/`, with results in `gs://op-datoric/processed/`:
+
+```bash
+cd stereo_hoi_pipeline
+python scripts/run_gcs_batch.py --list-sessions gs://op-datoric/raw/Op_DD/
+python scripts/run_gcs_batch.py --sessions-file sessions_10.txt
+```
+
+See [stereo_hoi_pipeline/docs/ego_qa.md](stereo_hoi_pipeline/docs/ego_qa.md) and
+[talking_to_mukul.md](talking_to_mukul.md).
+
 ## Hand & technical QC
 
 ```bash

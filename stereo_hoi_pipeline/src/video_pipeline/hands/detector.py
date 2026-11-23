@@ -145,6 +145,10 @@ class MediaPipeStereoDetector:
                              "lm": h["lm"]} for h in hands] for eye, hands in views.items()},
         }
 
+    def view_hands(self, jpeg: Path) -> list[dict[str, Any]]:
+        """Hands of ONE image, classified by the same rules (role wearer/other, hand, grasp)."""
+        return classify_view(self._detect(jpeg), self._rules)
+
     def timed_classify(self, left: Path, right: Path) -> tuple[dict[str, Any], float]:
         started = time.perf_counter()
         result = self.classify_pair(left, right)

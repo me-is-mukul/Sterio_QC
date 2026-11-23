@@ -14,6 +14,18 @@ from pathlib import Path
 from typing import Any
 
 
+def json_default(value: Any) -> Any:
+    """JSON fallback: numpy scalars/arrays become their Python values (a numpy bool must stay a
+    boolean, not the string "False", which would read as true); anything else becomes str."""
+    item = getattr(value, "item", None)
+    if callable(item) and type(value).__module__ == "numpy":
+        try:
+            return value.tolist() if getattr(value, "ndim", 0) else item()
+        except (TypeError, ValueError):
+            pass
+    return str(value)
+
+
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -58,7 +70,7 @@ def write_text_atomic(path: Path, text: str) -> None:
 
 
 def write_json_atomic(path: Path, data: Any) -> None:
-    write_text_atomic(path, json.dumps(data, indent=2, ensure_ascii=False, default=str) + "\n")
+    write_text_atomic(path, json.dumps(data, indent=2, ensure_ascii=False, default=json_default) + "\n")
 
 
 def read_json(path: Path) -> Any:
@@ -82,7 +94,7 @@ def read_csv(path: Path) -> tuple[list[dict[str, str]], list[str]]:
 
 
 def write_jsonl_atomic(path: Path, rows: Iterable[Any]) -> None:
-    write_text_atomic(path, "".join(json.dumps(r, ensure_ascii=False, default=str) + "\n" for r in rows))
+    write_text_atomic(path, "".join(json.dumps(r, ensure_ascii=False, default=json_default) + "\n" for r in rows))
 
 
 def read_jsonl(path: Path) -> list[Any]:
@@ -102,7 +114,7 @@ class JsonlAppender:
         self._handle = path.open("w" if truncate else "a", encoding="utf-8", newline="\n")
 
     def write(self, row: Any) -> None:
-        self._handle.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
+        self._handle.write(json.dumps(row, ensure_ascii=False, default=json_default) + "\n")
         self._handle.flush()
 
     def close(self) -> None:

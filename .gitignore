@@ -7,7 +7,7 @@ __pycache__/
 build/
 dist/
 .pytest_cache/
-
+talking_to_mukul.md
 # ---------------------------------------------------------------------------
 # Local environments and secrets (machine-specific; never commit)
 # ---------------------------------------------------------------------------
@@ -34,6 +34,8 @@ stereo_hoi_pipeline/videos/*
 !stereo_hoi_pipeline/videos/.gitkeep
 stereo_hoi_pipeline/outputs/*
 !stereo_hoi_pipeline/outputs/.gitkeep
+# Session lists for run_gcs_batch.py (private bucket paths)
+sessions*.txt
 
 # Hand QC: downloaded videos, results, and real clip lists (they contain private links)
 hand_qc/videos/

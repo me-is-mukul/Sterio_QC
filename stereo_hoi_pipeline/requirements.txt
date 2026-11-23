@@ -5,3 +5,11 @@ PyYAML>=6.0
 mediapipe==1.2.3                 # default HOI detector (hand landmarks); installs numpy + OpenCV
 opencv-contrib-python==5.0.0.93
 numpy==2.5.4
+# Egocentric QA on MCAP recordings in Cloud Storage (scripts/run_gcs_batch.py)
+mcap==1.6.0
+mcap-protobuf-support==0.6.0     # decodes the protobuf schemas embedded in the MCAP files
+protobuf==7.36.2                 # checked compatible with mediapipe 1.2.3 (pip check)
+google-cloud-storage==3.17.1
+google-crc32c==1.9.0
+google-genai==3.6.1              # Gemini on Vertex AI
+# Tests: pip install pytest   then   python -m pytest tests

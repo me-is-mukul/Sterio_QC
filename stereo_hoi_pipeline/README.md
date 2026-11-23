@@ -72,10 +72,19 @@ Those moments count as "no hands" and can be cut even though work is happening. 
 video, 22.5 s of hammering in direct sunlight was missed. For such footage use
 `--verify-with vlm`, and review cuts with the [QC playbook](docs/qc_playbook.md).
 
+## Egocentric QA on MCAP recordings (Cloud Storage)
+
+A second entry point, `scripts/run_gcs_batch.py`, applies the QA pass/fail sheet to the MCAP
+recordings in `gs://op-datoric/raw/` (two separate HEVC eyes, IMU and calibration per file) and writes
+`qa_report.json`, `calibration.json`, `labels.csv` and the kept clips (both eyes, no re-encode) to
+`gs://op-datoric/processed/`. Settings: `configs/ego_qa.yaml`. Details: [docs/ego_qa.md](docs/ego_qa.md).
+It does not change the MP4 pipeline above.
+
 ## Documentation
 
 | Document | Contents |
 |---|---|
+| [docs/ego_qa.md](docs/ego_qa.md) | Egocentric QA batch for MCAP recordings in Cloud Storage |
 | [docs/guide.md](docs/guide.md) | Setup, everyday use, optional model, sharing, Docker, troubleshooting |
 | [docs/qc_playbook.md](docs/qc_playbook.md) | How to review and approve a processed video |
 | [docs/pipeline.md](docs/pipeline.md) | Every stage, CLI options, resume rules, QC checks |

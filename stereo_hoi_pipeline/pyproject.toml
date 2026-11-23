@@ -13,11 +13,18 @@ dependencies = [
     "mediapipe==1.2.3",
     "opencv-contrib-python==5.0.0.93",
     "numpy==2.5.4",
+    "mcap==1.6.0",
+    "mcap-protobuf-support==0.6.0",
+    "protobuf==7.36.2",
+    "google-cloud-storage==3.17.1",
+    "google-crc32c==1.9.0",
+    "google-genai==3.6.1",
 ]
 
 [project.scripts]
 stereo-hoi = "video_pipeline.cli:main"
 stereo-hoi-ui = "video_pipeline.web.server:main"
+ego-qa-batch = "video_pipeline.ego_cli:main"
 
 [tool.setuptools.dynamic]
 version = { attr = "video_pipeline.__version__" }
