@@ -202,29 +202,43 @@ class GcsStorage:
                                  "(replacing a result needs storage.objects.delete)") from exc
 
     def upload(self, local: Path, bucket: str, name: str, *, overwrite: bool, content_type: str | None = None) -> str:
-        """Upload a file. Returns 'uploaded', or 'identical' when (create-only mode) the same bytes are
-        already there, e.g. from an earlier attempt that was interrupted."""
+        """Upload a file. Returns 'uploaded', 'identical' (the same bytes are already there, e.g. from an
+        interrupted earlier attempt) or 'replaced'.
+
+        Always tries create-only first: creating needs only storage.objects.create. Replacing an
+        existing object needs storage.objects.delete as well, so it is done only when the content
+        really differs and ``overwrite`` is True.
+        """
         from google.api_core import exceptions as gexc  # noqa: PLC0415
 
         if not name or name.startswith("/"):
             raise IngestionError(f"Invalid object name '{name}'")
         blob = self._client.bucket(bucket).blob(name)
         try:
-            # if_generation_match=0: create only, never replace an existing object.
-            blob.upload_from_filename(str(local), content_type=content_type,
-                                      if_generation_match=None if overwrite else 0)
+            blob.upload_from_filename(str(local), content_type=content_type, if_generation_match=0)
             return "uploaded"
         except gexc.PreconditionFailed as exc:
             existing = self._client.bucket(bucket).get_blob(name)
             if existing is not None and existing.size == local.stat().st_size and existing.crc32c == crc32c_base64(local):
                 return "identical"
-            raise IngestionError(f"gs://{bucket}/{name} already exists with different content; "
-                                 "upload.on_existing / --force decide whether to replace it.") from exc
+            if not overwrite:
+                raise IngestionError(f"gs://{bucket}/{name} already exists with different content; "
+                                     "upload.on_existing / --force decide whether to replace it.") from exc
         except Exception as exc:  # noqa: BLE001
-            hint = ""
-            if "403" in str(exc):
-                hint = " (permission denied: the service account needs storage.objects.create, plus delete to overwrite)"
-            raise IngestionError(f"Upload to gs://{bucket}/{name} failed: {exc}{hint}") from exc
+            raise IngestionError(f"Upload to gs://{bucket}/{name} failed: {exc}{_permission_hint(exc)}") from exc
+        try:
+            blob.upload_from_filename(str(local), content_type=content_type)
+            return "replaced"
+        except Exception as exc:  # noqa: BLE001
+            raise IngestionError(f"Replacing gs://{bucket}/{name} failed: {exc}{_permission_hint(exc)}") from exc
+
+
+def _permission_hint(exc: Exception) -> str:
+    if "403" not in str(exc):
+        return ""
+    return (" (permission denied: creating a result needs storage.objects.create; replacing or deleting an "
+            "existing one (re-runs, --force) also needs storage.objects.delete, e.g. roles/storage.objectAdmin "
+            "on processed/)")
 
 
 def crc32c_base64(path: Path) -> str:
