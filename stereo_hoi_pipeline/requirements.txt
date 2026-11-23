@@ -4,7 +4,8 @@
 PyYAML>=6.0
 mediapipe==1.2.3                 # default HOI detector (hand landmarks); installs numpy + OpenCV
 opencv-contrib-python==5.0.0.93
-numpy==2.5.4
+numpy==2.5.4; python_version >= "3.12"
+numpy==2.4.6; python_version < "3.12"     # numpy 2.5 needs Python 3.12+ (the VM has 3.11)
 # Egocentric QA on MCAP recordings in Cloud Storage (scripts/run_gcs_batch.py)
 mcap==1.6.0
 mcap-protobuf-support==0.6.0     # decodes the protobuf schemas embedded in the MCAP files
