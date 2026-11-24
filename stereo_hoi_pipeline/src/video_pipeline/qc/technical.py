@@ -454,9 +454,22 @@ def pair_eyes(cam0: np.ndarray, cam1: np.ndarray, *, tolerance_ns: int, max_edge
         if best is None or matched > best[0]:
             best = (matched, shift, a0, a1, length, diff)
     matched, shift, a0, a1, length, diff = best
+    # Pairs that do not match at the very start or end of the overlap (an eye whose first or last frame
+    # came a frame early or late) are unpaired edge frames too: trimmed when there are few of them.
+    over = diff > tolerance_ns
+    lead = int(np.argmin(over)) if not over.all() else length
+    trail = int(np.argmin(over[::-1])) if not over.all() else 0
+    trimmed_mismatched = {"start": 0, "end": 0}
+    if 0 < lead <= max_edge_frames or 0 < trail <= max_edge_frames:
+        cut_lead = lead if lead <= max_edge_frames else 0
+        cut_trail = trail if trail <= max_edge_frames else 0
+        a0, a1, length = a0 + cut_lead, a1 + cut_lead, length - cut_lead - cut_trail
+        diff = diff[cut_lead:len(diff) - cut_trail]
+        trimmed_mismatched = {"start": cut_lead, "end": cut_trail}
     bad = np.flatnonzero(diff > tolerance_ns)
     edges = {"cam0_start": a0, "cam1_start": a1, "cam0_end": n0 - (a0 + length), "cam1_end": n1 - (a1 + length)}
     result.update(shift=shift, overlap=length, unmatched_inside=int(len(bad)), unpaired_edge_frames=edges,
+                  mismatched_edge_pairs_trimmed=trimmed_mismatched,
                   max_offset_ms=round(float(diff.max()) / 1e6, 4) if length else None)
     if len(bad):
         result["message"] = (f"{len(bad)} frame pairs differ by more than {tolerance_ns / 1e6:g} ms "

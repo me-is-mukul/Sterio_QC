@@ -169,7 +169,7 @@ class State:
 # ---------------------------------------------------------------------------------------------
 
 def target_prefix(cfg: ResolvedConfig, session: SessionRef, run_id: str) -> str:
-    base = f"{cfg.get('source.processed_root')}{session.relative}/"
+    base = f"{cfg.get('source.processed_root')}{session.output_relative}/"
     if cfg.get("upload.on_existing") == "new_run_folder":
         return f"{base}runs/{run_id}/"
     return base
@@ -180,16 +180,16 @@ def run_session(session: SessionRef, services: Services, *, force: bool, upload:
     cfg = services.config
     started = time.perf_counter()
     bucket = processed_bucket(cfg)
-    existing_report = f"{cfg.get('source.processed_root')}{session.relative}/qa_report.json"
+    existing_report = f"{cfg.get('source.processed_root')}{session.output_relative}/qa_report.json"
     on_existing = cfg.get("upload.on_existing")
     if upload and not force and on_existing == "skip" and services.storage.exists(bucket, existing_report):
         logger.info("%s: already processed (gs://%s/%s exists); skipped. Use --force to redo it.",
-                    session.relative, bucket, existing_report)
+                    session.output_relative, bucket, existing_report)
         return {"session": session.url, "status": "SKIPPED", "reasons": "already processed", "elapsed_s": 0.0}
 
     work_root = Path(cfg.get("work.directory"))
     work_root = work_root if work_root.is_absolute() else services.project_root / work_root
-    paths = SessionPaths((work_root / session.relative).resolve())
+    paths = SessionPaths((work_root / session.output_relative).resolve())
     if force and paths.root.exists():
         if paths.lock.exists():
             RunLock(paths.lock, "check").acquire()   # raises if another live run holds it
@@ -216,6 +216,8 @@ def _run_locked(session: SessionRef, services: Services, paths: SessionPaths, *,
     if listing.format is None:
         raise IngestionError(f"{session.url} is not a recording in a known format (files: "
                              f"{sorted(o.name[len(session.prefix):] for o in objects)[:10]}).")
+    if session.segment is not None:
+        listing = listing.only_segment(session.segment)
     listing = listing.limited(max_segments)
 
     manifest = _open_manifest(paths, session, listing, max_segments)
@@ -226,7 +228,7 @@ def _run_locked(session: SessionRef, services: Services, paths: SessionPaths, *,
     state.reader = make_reader(listing, services.storage, cfg, work_dir=paths.work, keep_dir=paths.out / "recording",
                                max_segments=max_segments)
     try:
-        logger.info("Session %s | format %s | %d segments, %.2f GB | run %s", session.relative, listing.format,
+        logger.info("Session %s | format %s | %d segments, %.2f GB | run %s", session.output_relative, listing.format,
                     len(listing.segments), listing.total_bytes / 1e9, manifest.run_id)
         write_json_atomic(paths.out / "source_listing.json", {**session.describe(), **listing.to_dict(),
                                                                "max_segments": max_segments})
@@ -265,18 +267,19 @@ def _run_locked(session: SessionRef, services: Services, paths: SessionPaths, *,
             manifest.finish("completed")
             manifest.save(paths.manifest)
             logger.info("Upload disabled; results are in %s", paths.out)
-        logger.info("Session %s: %s%s (%.1f s)", session.relative, report["verdict"],
+        logger.info("Session %s: %s%s (%.1f s)", session.output_relative, report["verdict"],
                     "" if report["verdict"] == PASS else " - " + "; ".join(r["message"] for r in report["fail_reasons"]),
                     time.perf_counter() - started)
         return {"session": session.url, "status": report["verdict"],
                 "reasons": "; ".join(r["message"] for r in report["fail_reasons"]),
+                "source_seconds": (report.get("technical") or {}).get("duration_s"),
                 "kept_seconds": report["cropping"].get("kept_seconds") if report.get("cropping") else 0,
                 "clips": len(report.get("clips", [])),
                 "calibration": (report.get("calibration") or {}).get("result"),
                 "elapsed_s": round(time.perf_counter() - started, 1)}
     except BaseException as exc:
         interrupted = isinstance(exc, KeyboardInterrupt)
-        logger.error("Session %s %s: %s", session.relative, "interrupted" if interrupted else "failed", exc,
+        logger.error("Session %s %s: %s", session.output_relative, "interrupted" if interrupted else "failed", exc,
                      exc_info=not isinstance(exc, (PipelineError, KeyboardInterrupt)))
         manifest.finish("interrupted" if interrupted else "failed")
         try:
@@ -295,13 +298,13 @@ def _open_manifest(paths: SessionPaths, session: SessionRef, listing: SessionLis
         previous = RunManifest.load(paths.manifest)
         if previous.source.get("identity") == identity and previous.status not in {"completed"}:
             previous.begin_attempt("resume", [])
-            logger.info("Resuming run %s for %s.", previous.run_id, session.relative)
+            logger.info("Resuming run %s for %s.", previous.run_id, session.output_relative)
             return previous
         if previous.source.get("identity") != identity:
             logger.info("The session's objects changed since the last local run; starting from scratch.")
         for child in (paths.work, paths.out):
             shutil.rmtree(child, ignore_errors=True)
-    manifest = RunManifest.create(generate_run_id(), session.relative, __version__)
+    manifest = RunManifest.create(generate_run_id(), session.output_relative, __version__)
     manifest.begin_attempt("new", [])
     manifest.set_source({**session.describe(), "identity": identity, "segments": len(listing.segments),
                          "bytes": listing.total_bytes})

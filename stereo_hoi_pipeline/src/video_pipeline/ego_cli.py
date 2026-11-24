@@ -29,11 +29,12 @@ from video_pipeline.core.errors import ConfigError, PipelineError
 from video_pipeline.core.gcp_auth import get_credentials
 from video_pipeline.core.io import utc_now, write_text_atomic
 from video_pipeline.core.logging_setup import LoggingController
-from video_pipeline.ingestion.formats import classify, detect_format
+from video_pipeline.ingestion.formats import PER_SEGMENT_FORMATS, classify, detect_format
 from video_pipeline.ingestion.gcs import GcsStorage, SessionRef, parse_gs_url
 
 EXIT_OK, EXIT_ERRORS, EXIT_USAGE, EXIT_INTERRUPTED = 0, 1, 2, 130
-SUMMARY_FIELDS = ["session", "status", "reasons", "kept_seconds", "clips", "calibration", "elapsed_s"]
+SUMMARY_FIELDS = ["session", "status", "reasons", "source_seconds", "kept_seconds", "clips", "calibration",
+                  "elapsed_s"]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -107,7 +108,7 @@ def source_root(prefix: str) -> str:
 def session_root(bucket: str, prefix: str, found: Sequence[dict]) -> str:
     """Root below which the found sessions are named: the source folder itself, or its parent when the
     source folder is itself a recording (it must then not be in the bucket root)."""
-    if any(s["url"] == f"gs://{bucket}/{prefix}" for s in found):
+    if any(s.get("folder", s["url"]) == f"gs://{bucket}/{prefix}" for s in found):
         parts = prefix.rstrip("/").split("/")
         if len(parts) == 1:
             raise PipelineError("A recording folder directly in the bucket root cannot be a source folder.")
@@ -116,11 +117,12 @@ def session_root(bucket: str, prefix: str, found: Sequence[dict]) -> str:
 
 
 def discover_sessions(storage: GcsStorage, bucket: str, prefix: str, segment_pattern: str) -> tuple[list[dict], int]:
-    """Recordings below a prefix, sorted by path: [{'url', 'format', 'bytes', 'files', 'segments'}], plus
-    the number of folders skipped because their files are not a recording in a known format.
+    """Recordings below a prefix, sorted by path: [{'url', 'folder', 'format', 'bytes', 'files', 'segments',
+    'segment'}], plus the number of folders skipped because their files are not a recording in a known format.
 
     A folder is a recording when the files directly inside it match a format (ingestion/formats);
-    sub-folders are looked at separately (robocap keeps one session per sub-folder)."""
+    sub-folders are looked at separately (robocap keeps one session per sub-folder). In the formats whose
+    segments are recordings of their own (robocap) every segment is one entry, '<folder>/#seg<N>'."""
     folders: dict[str, list] = defaultdict(list)
     for obj in storage.list_objects(bucket, prefix):
         if obj.name.endswith("/"):
@@ -135,9 +137,34 @@ def discover_sessions(storage: GcsStorage, bucket: str, prefix: str, segment_pat
             continue
         listing = classify(SessionRef(bucket=bucket, raw_root="", relative=folder.rstrip("/")), folders[folder],
                            segment_pattern)
-        found.append({"url": f"gs://{bucket}/{folder}", "format": fmt, "bytes": listing.total_bytes,
-                      "files": len(listing.objects()), "segments": len(listing.segments)})
+        url = f"gs://{bucket}/{folder}"
+        if fmt in PER_SEGMENT_FORMATS and listing.segments:
+            for seg in listing.segments:
+                found.append({"url": f"{url}#seg{seg.number}", "folder": url, "format": fmt, "bytes": seg.size,
+                              "files": len(seg.files), "segments": 1, "segment": seg.number})
+            continue
+        found.append({"url": url, "folder": url, "format": fmt, "bytes": listing.total_bytes,
+                      "files": len(listing.objects()), "segments": len(listing.segments), "segment": None})
     return found, skipped
+
+
+def expand_segments(storage: GcsStorage, sessions: Sequence[SessionRef], segment_pattern: str) -> list[SessionRef]:
+    """A folder of a per-segment format (robocap) given as one session becomes one session per segment."""
+    out: list[SessionRef] = []
+    for ref in sessions:
+        if ref.segment is not None:
+            out.append(ref)
+            continue
+        try:
+            listing = classify(ref, storage.list_objects(ref.bucket, ref.prefix), segment_pattern)
+        except PipelineError:
+            out.append(ref)                 # the run reports what is wrong with it
+            continue
+        if listing.format in PER_SEGMENT_FORMATS and listing.segments:
+            out.extend(ref.with_segment(seg.number) for seg in listing.segments)
+        else:
+            out.append(ref)
+    return out
 
 
 def select_range(items: Sequence, start: int | None, end: int | None) -> list:
@@ -157,11 +184,12 @@ def format_session_list(found: Sequence[dict], skipped: int, start: int | None, 
     last = len(found) if end is None else end
     marked = start is not None or end is not None
     lines = [f"{'>' if marked and first <= n <= last else ' '}{n:4d}  {s['format']:<12} {s['bytes'] / 1e9:8.2f} GB"
-             f"  {s['segments']:3d} segments  {s['url']}" for n, s in enumerate(found, start=1)]
+             f"  {('one segment' if s.get('segment') is not None else str(s['segments']) + ' segments'):>12}  {s['url']}"
+             for n, s in enumerate(found, start=1)]
     by_format: dict[str, int] = defaultdict(int)
     for s in found:
         by_format[s["format"]] += 1
-    lines.append(f"{len(found)} sessions, {sum(s['bytes'] for s in found) / 1e9:.1f} GB"
+    lines.append(f"{len(found)} recordings, {sum(s['bytes'] for s in found) / 1e9:.1f} GB"
                  + (f" ({', '.join(f'{k}: {v}' for k, v in sorted(by_format.items()))})" if found else "")
                  + (f"; {skipped} folder(s) without a recording in a known format not listed" if skipped else ""))
     if found and marked:
@@ -239,8 +267,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             if args.session or args.sessions_file:
                 urls = args.session or read_sessions_file(args.sessions_file)
-                sessions = [SessionRef.from_url(u, expected_bucket=config.get("source.bucket"),
-                                                raw_root=config.get("source.raw_root")) for u in urls]
+                sessions = expand_segments(storage, [SessionRef.from_url(u, expected_bucket=config.get("source.bucket"),
+                                                                         raw_root=config.get("source.raw_root"))
+                                                     for u in urls], pattern)
             elif args.source:
                 bucket, prefix = folder_prefix(args.source, "--source")
                 found, _ = discover_sessions(storage, bucket, prefix, pattern)
@@ -261,7 +290,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         except (PipelineError, ConfigError) as exc:
             print(f"Session list: {exc}", file=sys.stderr)
             return EXIT_USAGE
-        if len({s.relative for s in sessions}) != len(sessions):
+        if len({s.url for s in sessions}) != len(sessions):
             print("The session list contains duplicates.", file=sys.stderr)
             return EXIT_USAGE
         return _run_batch(args, raw_argv, config, project_root, environment, credentials, credentials_desc, storage,

@@ -55,6 +55,18 @@ def test_pair_extra_leading_frame_skips_to_common_keyframe():
     assert abs(int(cam0["t_ns"][a0]) - int(cam1["t_ns"][a1])) < 5_000_000
 
 
+def test_pair_lost_second_frame_trims_the_first_pair():
+    # robocap 20260518_212645_session31: cam0 lost its 2nd frame, so its 1st frame pairs with nothing
+    r = pair_eyes(table(100, drop={1}), table(100), tolerance_ns=5_000_000, max_edge_frames=3)
+    assert r["ok"] and r["mismatched_edge_pairs_trimmed"] == {"start": 1, "end": 0}
+    a0, b0 = r["cam0_rows"]
+    a1, b1 = r["cam1_rows"]
+    assert b0 - a0 == b1 - a1 > 0
+    # the same at the end of the recording
+    r = pair_eyes(table(100, drop={98}), table(100), tolerance_ns=5_000_000, max_edge_frames=3)
+    assert r["ok"] and r["mismatched_edge_pairs_trimmed"]["end"] == 1
+
+
 def test_pair_inner_gap_fails():
     r = pair_eyes(table(100), table(101, drop={50}), tolerance_ns=5_000_000, max_edge_frames=3)
     assert not r["ok"] and r["unmatched_inside"] > 0

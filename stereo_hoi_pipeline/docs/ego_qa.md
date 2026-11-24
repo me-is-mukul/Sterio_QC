@@ -83,15 +83,24 @@ recording's format; folders that match no format (macOS index folders, empty fol
 as "not a recording" and skipped. On 01-11-2026 the bucket holds 453 recordings: 205 MCAP, 237
 robocap, 6 EGO-CAM live, 5 `capture.egoc`.
 
+**robocap is judged one segment at a time.** Every robocap segment has its own MP4 files and start
+times, so each segment is a recording of its own: it is listed, numbered, passed or failed and
+stored separately, as `<session folder>/#seg<N>` (results in `<session>/seg<N>/`). A broken segment
+(e.g. its MP4 has no index because the recorder was stopped) fails alone; the other segments of the
+session are still judged. `--list-sessions` therefore shows one line per robocap segment, and
+`--session <robocap folder>/` runs all its segments (`--session <folder>/#seg2` only that one).
+Joining the segments into one stream also made the decoder report one error at a segment
+boundary (measured on SDC482 session13: 0 errors when each segment is decoded alone).
+
 | Format | Files in the session folder | Eyes | Frame times | IMU |
 |---|---|---|---|---|
 | `mcap` | `ego_NNNN.mcap` (from 0), `session.json` | two HEVC streams | device clock | in the MCAP, same clock |
-| `robocap` | `robocap_segmentN_<file>` (from 1, about 10 min each): six MP4 cameras, `imu_left.db`, `imu_right.db`, `mag_middle.db` | `video_left_front.mp4` + `video_right_front.mp4` (`formats.robocap.cameras`) | each MP4's `comment` tag = its first frame's device time (µs) + MP4 times | `imu_left.db` (SQLite, raw units, ns, same clock) |
+| `robocap` | `robocap_segmentN_<file>` (from 1, 10 or 30 min each depending on the device): six MP4 cameras, `imu_left.db`, `imu_right.db`, `mag_middle.db` | `video_left_front.mp4` + `video_right_front.mp4` (`formats.robocap.cameras`) | each MP4's `comment` tag = its first frame's device time (µs) + MP4 times | `imu_left.db` (SQLite, raw units, ns, same clock) |
 | `hydra` | `video.h265`, `frames.idx`, `h265_frame_meta.csv`, `h265_imu.csv`, `meta.json`, `session.json`, `stereo_calibration.bin` | one side-by-side HEVC picture, 3840x1200: left half / right half | sensor time per eye (`frame_pts_us`) | `h265_imu.csv` (deg/s, g; 500 Hz, same clock) |
 | `egocam_live` | `video_live_NNNN.mp4` (30 s each, from 0), `frame_map.csv`, `calibration.json`, `metadata.json` | one side-by-side HEVC picture, 4000x1200: x 160-2080 and 2080-4000 (`calibration.json` `eye_crop_x`) | host receive time (`frame_map.csv`) + the camera's capture counter | inside each frame's barcode: **not checked** |
 | `egocam_egoc` | `capture.egoc`, `calibration.json`, `metadata.json` | same picture, as JPEGs (MJPEG) | host receive time per frame | inside the barcode: **not checked** |
 
-Required files (missing = FAIL): MCAP `session.json` + `ego_0000.mcap`; robocap `robocap_segment1_…`;
+Required files (missing = FAIL): MCAP `session.json` + `ego_0000.mcap`; robocap: the segment's files;
 Hydra `video.h265`, `frames.idx`, `h265_frame_meta.csv`; EGO-CAM live `video_live_0000.mp4` +
 `frame_map.csv`; egoc `capture.egoc`. Every format: segment numbers without gaps; in every segment
 both cameras (and the IMU where the format has one) readable.
@@ -169,6 +178,9 @@ gs://op-datoric/processed/Op_DD/<date>/<device>/<session>/
   _<step>.json          intermediate result of each step
 gs://op-datoric/processed/_batches/<batch id>/  sessions.txt  summary.csv
 ```
+
+`summary.csv` has one row per recording (per segment for robocap): `session, status, reasons,
+source_seconds` (length of the paired video), `kept_seconds, clips, calibration, elapsed_s`.
 
 * A FAILed recording gets the report, labels (if it got that far) and logs, no clips.
 * `upload.on_existing`: `skip` (default: a session with a `qa_report.json` is not redone without

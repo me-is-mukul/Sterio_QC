@@ -19,6 +19,8 @@ READERS: dict[str, type[RecordingReader]] = {
     "egocam_live": EgoCamLiveReader,
     "egocam_egoc": EgocReader,
 }
+# formats judged one segment at a time (each segment is its own recording, <folder>/#seg<N>)
+PER_SEGMENT_FORMATS = frozenset(name for name, reader in READERS.items() if reader.per_segment)
 
 
 def make_reader(listing, storage, cfg, *, work_dir: Path, keep_dir: Path, max_segments: int | None = None
@@ -30,4 +32,4 @@ def make_reader(listing, storage, cfg, *, work_dir: Path, keep_dir: Path, max_se
                                    max_segments=max_segments)
 
 
-__all__ = ["FORMATS", "READERS", "RecordingReader", "classify", "detect_format", "make_reader"]
+__all__ = ["FORMATS", "PER_SEGMENT_FORMATS", "READERS", "RecordingReader", "classify", "detect_format", "make_reader"]

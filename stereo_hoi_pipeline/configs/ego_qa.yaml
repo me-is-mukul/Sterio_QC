@@ -84,7 +84,8 @@ technical:
   max_frame_gap_seconds: 0.1     # a longer gap between consecutive frames = irregular frame rate
   max_eye_offset_ms: 5           # left/right capture times of one frame pair (measured: ~0.01 ms)
   # One eye may start earlier / stop later by a frame or two (seen: cam1 kept 1 extra frame at the
-  # end). Up to this many unpaired frames at each end are trimmed; any unpaired frame inside = FAIL.
+  # end; robocap SDC482 session31: cam0 lost its 2nd frame, so its 1st frame matched nothing). Up to
+  # this many unpaired or mismatched frames at each end are trimmed; any unpaired frame inside = FAIL.
   max_unpaired_edge_frames: 3
   imu_max_gap_seconds: 0.05
   imu_coverage_tolerance_seconds: 0.1   # IMU must start <= first frame + this and end >= last frame - this

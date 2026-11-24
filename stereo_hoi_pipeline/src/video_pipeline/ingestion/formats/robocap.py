@@ -1,4 +1,5 @@
-"""Robocap sessions: robocap_segmentN_<file> for N = 1, 2, ... (about 10 minutes each).
+"""Robocap sessions: robocap_segmentN_<file> for N = 1, 2, ... (10 or 30 minutes each; each segment
+is judged as a recording of its own, see ingestion/gcs.py).
 
 Per segment: six HEVC MP4 cameras (video_left/right, video_left/right_eye, video_left/right_front),
 SQLite IMU files (imu_left.db, imu_right.db: gyro_data + acc_data in raw sensor units with
@@ -28,6 +29,7 @@ import numpy as np
 from video_pipeline.core.errors import IngestionError
 from video_pipeline.ingestion.formats.base import (
     RecordingReader,
+    check,
     contiguous_checks,
     empty_table,
     frame_table,
@@ -66,6 +68,7 @@ def read_imu_db(path: Path, gyro_lsb_per_dps: float, accel_lsb_per_g: float) -> 
 class RobocapReader(RecordingReader):
     format = "robocap"
     layout = "pair"
+    per_segment = True
     description = "robocap (six MP4 cameras + SQLite IMU per segment)"
 
     def __init__(self, *args, **kwargs) -> None:
@@ -80,6 +83,12 @@ class RobocapReader(RecordingReader):
         return {"robocap": self.cfg.get("formats.robocap")}
 
     def required_files(self) -> list[dict[str, Any]]:
+        if self.listing.session.segment is not None:
+            # one segment judged on its own: its camera pair and IMU are checked when it is read
+            n = self.listing.session.segment
+            present = any(s.number == n for s in self.segments())
+            return [check("segment_present", present, f"robocap_segment{n} files present" if present
+                          else f"robocap_segment{n} has no files")]
         return contiguous_checks([s.number for s in self.segments()], 1, "robocap_segment1")
 
     def extract(self, stream_dir: Path) -> list[int]:

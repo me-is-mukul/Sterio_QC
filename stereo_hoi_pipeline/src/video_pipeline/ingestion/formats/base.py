@@ -156,6 +156,9 @@ class RecordingReader:
     host_clock = False
     frame_counter = False
     harmless_decode_errors: tuple[str, ...] = ()
+    # per_segment: every segment is a complete recording of its own (own files and start times) and is
+    # judged on its own, as <folder>/#seg<N> (robocap). Otherwise the whole folder is one recording.
+    per_segment = False
     description = ""
 
     def __init__(self, listing, storage, cfg, *, work_dir: Path, keep_dir: Path, max_segments: int | None = None) -> None:

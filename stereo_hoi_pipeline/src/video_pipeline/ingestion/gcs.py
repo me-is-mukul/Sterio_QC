@@ -3,11 +3,16 @@
 A *session* is one folder ``<raw_root><path>/`` whose files form one recording in one of the
 supported formats (see ingestion/formats). Results go to ``<processed_root><path>/`` (the same
 relative path). Nothing is ever written below ``raw_root``.
+
+Formats whose segments are complete recordings of their own (robocap: every segment has its own MP4
+files and start times) are judged one segment at a time: the session reference then names the
+segment (URL ``<folder>/#seg<N>``) and the results go to ``<processed_root><path>/seg<N>/``.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -16,6 +21,8 @@ from video_pipeline.core.errors import IngestionError
 from video_pipeline.core.hashing import sha256_json
 
 logger = logging.getLogger(__name__)
+
+_SEGMENT_SUFFIX = re.compile(r"#seg(\d+)$")
 
 
 def parse_gs_url(url: str) -> tuple[str, str]:
@@ -48,10 +55,18 @@ class SessionRef:
     bucket: str
     raw_root: str
     relative: str
+    segment: int | None = None      # one segment of the folder (robocap), None = the whole folder
 
     @classmethod
     def from_url(cls, url: str, *, expected_bucket: str, raw_root: str) -> SessionRef:
-        bucket, prefix = parse_gs_url(url.strip())
+        """``gs://bucket/<raw_root>/<path>/`` or, for one segment, ``gs://bucket/<raw_root>/<path>/#seg<N>``."""
+        url = url.strip()
+        segment = None
+        m = _SEGMENT_SUFFIX.search(url)
+        if m:
+            segment = int(m.group(1))
+            url = url[:m.start()]
+        bucket, prefix = parse_gs_url(url)
         if bucket != expected_bucket:
             raise IngestionError(f"'{url}' is not in bucket '{expected_bucket}' (source.bucket).")
         if not prefix.startswith(raw_root):
@@ -60,15 +75,24 @@ class SessionRef:
         parts = PurePosixPath(relative).parts
         if not parts or any(p in {".", ".."} for p in parts):
             raise IngestionError(f"'{url}' does not name a session folder below gs://{bucket}/{raw_root}.")
-        return cls(bucket=bucket, raw_root=raw_root, relative="/".join(parts))
+        return cls(bucket=bucket, raw_root=raw_root, relative="/".join(parts), segment=segment)
+
+    def with_segment(self, number: int) -> SessionRef:
+        return SessionRef(self.bucket, self.raw_root, self.relative, number)
 
     @property
     def prefix(self) -> str:
+        """The recording's folder (where its files are listed)."""
         return f"{self.raw_root}{self.relative}/"
 
     @property
     def url(self) -> str:
-        return f"gs://{self.bucket}/{self.prefix}"
+        return f"gs://{self.bucket}/{self.prefix}" + (f"#seg{self.segment}" if self.segment is not None else "")
+
+    @property
+    def output_relative(self) -> str:
+        """Path of the results below processed_root (and of the local work folder)."""
+        return self.relative + (f"/seg{self.segment}" if self.segment is not None else "")
 
     @property
     def name(self) -> str:
@@ -80,6 +104,7 @@ class SessionRef:
             "url": self.url,
             "relative_path": self.relative,
             "session": parts[-1],
+            "segment": self.segment,
             "device": parts[-2] if len(parts) >= 2 else None,
             "date": parts[-3] if len(parts) >= 3 else None,
         }
@@ -133,6 +158,15 @@ class SessionListing:
         if max_segments is None:
             return self
         return SessionListing(self.session, self.format, self.files, self.segments[:max_segments], self.other)
+
+    def only_segment(self, number: int) -> SessionListing:
+        """The listing of one segment (the other segments' files count as 'other')."""
+        chosen = tuple(s for s in self.segments if s.number == number)
+        if not chosen:
+            raise IngestionError(f"{self.session.url}: no segment {number} (segments: "
+                                 f"{[s.number for s in self.segments]})")
+        rest = tuple(o for s in self.segments if s.number != number for o in s.files.values())
+        return SessionListing(self.session, self.format, self.files, chosen, self.other + rest)
 
     def to_dict(self) -> dict:
         return {
