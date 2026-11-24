@@ -11,10 +11,13 @@ The raw streams get the container clock n / fps (`-framerate`), so FFmpeg frame 
 
 from __future__ import annotations
 
+import contextvars
+import logging
 import math
 import re
 import shutil
 import subprocess
+import threading
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -31,6 +34,8 @@ _BLACK = re.compile(r"black_start:\s*([-\d.]+)\s+black_end:\s*([-\d.]+)")
 _FREEZE_START = re.compile(r"freeze_start:\s*([-\d.]+)")
 _FREEZE_END = re.compile(r"freeze_end:\s*([-\d.]+)")
 _LEVEL = re.compile(r"\[(error|fatal|panic)\]")
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -105,12 +110,83 @@ def _last_progress_frame(path: Path) -> int | None:
     return int(frames[-1]) if frames else None
 
 
+def _tail_progress_frame(path: Path, tail_bytes: int = 4096) -> int:
+    """Latest frame= of an FFmpeg -progress file, reading only its end (the file grows all run)."""
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, 2)
+            size = handle.tell()
+            handle.seek(max(0, size - tail_bytes))
+            text = handle.read().decode("utf-8", "replace")
+    except OSError:
+        return 0
+    frames = re.findall(r"^frame=(\d+)", text, flags=re.MULTILINE)
+    return int(frames[-1]) if frames else 0
+
+
+def _minutes(seconds: float) -> str:
+    seconds = max(0, int(round(seconds)))
+    h, rem = divmod(seconds, 3600)
+    return f"{h} h {rem // 60:02d} min" if h else f"{rem // 60} min {rem % 60:02d} s"
+
+
+def format_decode_progress(done: Mapping[str, int], total: int, elapsed: float, fps: float) -> str:
+    """One progress line: frames per eye, speed vs real time, time left (the slower eye decides)."""
+    slowest = min(done.values()) if done else 0
+    per_eye = ", ".join(f"{cam} {n}/{total}" for cam, n in done.items())
+    pct = 100.0 * slowest / total if total else 100.0
+    if slowest <= 0 or elapsed <= 0:
+        return f"Decoding: {per_eye} ({pct:.0f}%), starting ..."
+    rate = slowest / elapsed                                 # frames per second, both eyes in parallel
+    left = (total - slowest) / rate
+    return (f"Decoding: {per_eye} ({pct:.0f}%) | speed {rate / fps:.2f}x real time | "
+            f"elapsed {_minutes(elapsed)}, about {_minutes(left)} left")
+
+
+class _ProgressReporter:
+    """Logs decode progress every `interval` seconds from FFmpeg's -progress files, on its own thread."""
+
+    def __init__(self, progress_files: Mapping[str, Path], total: int, fps: float, interval: float) -> None:
+        self._files, self._total, self._fps, self._interval = dict(progress_files), total, fps, interval
+        self._stop = threading.Event()
+        self._started = time.perf_counter()
+        context = contextvars.copy_context()                 # keep the step name on the log lines
+        self._thread = threading.Thread(target=context.run, args=(self._run,), name="decode-progress", daemon=True)
+
+    def __enter__(self) -> _ProgressReporter:
+        if self._interval > 0:
+            self._thread.start()
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self._stop.set()
+        if self._thread.is_alive():
+            self._thread.join(timeout=5)
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._interval):
+            done = {cam: _tail_progress_frame(path) for cam, path in self._files.items()}
+            logger.info(format_decode_progress(done, self._total, time.perf_counter() - self._started, self._fps))
+
+
 def decode_both(ffmpeg: str, open_segment: SegmentOpener, camera_topics: Sequence[str],
                 tables: Mapping[str, np.ndarray], settings: DecodeSettings, *, sample_dirs: Mapping[str, Path],
-                calib_dirs: Mapping[str, Path], calib_indices: Sequence[int], log_dir: Path) -> dict[str, dict[str, Any]]:
+                calib_dirs: Mapping[str, Path], calib_indices: Sequence[int], log_dir: Path,
+                progress_interval_seconds: float = 60.0) -> dict[str, dict[str, Any]]:
     """Decode both eyes in ONE streaming read of the segments: each eye's packets go straight from the
-    source into its own FFmpeg process (bounded in-memory queues; nothing video-sized on disk)."""
+    source into its own FFmpeg process (bounded in-memory queues; nothing video-sized on disk).
+    Logs a progress line every `progress_interval_seconds` (0 = off)."""
     log_dir.mkdir(parents=True, exist_ok=True)
+    total = max((len(t) for t in tables.values()), default=0)
+    with _ProgressReporter({cam: log_dir / f"decode_{cam}.progress" for cam in tables}, total, settings.fps,
+                           progress_interval_seconds):
+        return _decode_both(ffmpeg, open_segment, camera_topics, tables, settings, sample_dirs=sample_dirs,
+                            calib_dirs=calib_dirs, calib_indices=calib_indices, log_dir=log_dir)
+
+
+def _decode_both(ffmpeg: str, open_segment: SegmentOpener, camera_topics: Sequence[str],
+                 tables: Mapping[str, np.ndarray], settings: DecodeSettings, *, sample_dirs: Mapping[str, Path],
+                 calib_dirs: Mapping[str, Path], calib_indices: Sequence[int], log_dir: Path) -> dict[str, dict[str, Any]]:
     procs: dict[str, subprocess.Popen] = {}
     feeders: dict[str, PipeFeeder] = {}
     commands: dict[str, list[str]] = {}

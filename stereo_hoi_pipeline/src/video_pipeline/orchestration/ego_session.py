@@ -503,7 +503,8 @@ def _step_technical(state: State, services: Services) -> dict[str, Any]:
                                   freeze_noise_db=tech["freeze_noise_db"], freeze_min_seconds=tech["freeze_min_seconds"],
                                   timeout_seconds=tech["decode_timeout_seconds"])
         ffmpeg = resolve_executable(cfg.get("tools.ffmpeg"))
-        logger.info("Decoding both eyes (%d frames each), streamed from the bucket ...", n)
+        logger.info("Decoding both eyes (%d frames each = %.0f min of video), streamed from the bucket; "
+                    "progress every minute ...", n, n / settings.fps / 60)
         decode = decode_both(ffmpeg, segment_opener(state, services), cfg.get("topics.cameras"), tables, settings,
                              sample_dirs={cam: paths.samples / cam for cam in CAMERA_KEYS},
                              calib_dirs={cam: paths.calib / cam for cam in CAMERA_KEYS},
