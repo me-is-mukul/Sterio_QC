@@ -44,6 +44,17 @@ A run that stops (crash, Ctrl+C, lost SSH) continues where it stopped when start
 same command: finished steps are skipped, labelled frames are cached, extracted segments are kept.
 Use `tmux` on the VM.
 
+## VM setup (once per VM)
+
+MediaPipe (the hand detector) needs the system graphics libraries, also on a VM without a screen
+or GPU. Without them the batch stops at the start with `libEGL.so.1: cannot open shared object file`:
+
+```bash
+sudo apt-get update && sudo apt-get install -y ffmpeg tmux libegl1 libgles2
+```
+
+The batch starts the models before the first recording, so a missing library shows up in seconds.
+
 ## What happens to one recording
 
 | Step | Sheet | What it does |

@@ -281,6 +281,17 @@ def _run_batch(args, raw_argv, config, project_root, environment, credentials, c
     rows = []
     interrupted = False
     try:
+        if args.until not in ("extract", "technical", "calibration"):
+            # Start the models now: a missing library or model file stops the batch in seconds,
+            # not after the first recording has been streamed and decoded.
+            try:
+                services.labellers()
+            except Exception as exc:  # noqa: BLE001
+                log.error("The models could not start, so nothing was processed: %s: %s", type(exc).__name__, exc)
+                if "libEGL" in str(exc) or "libGLES" in str(exc):
+                    log.error("MediaPipe needs the system graphics libraries. On the VM run once: "
+                              "sudo apt-get install -y libegl1 libgles2   (see docs/ego_qa.md, 'VM setup')")
+                return EXIT_ERRORS
         for number, session in enumerate(sessions, start=1):
             log.info("===== Session %d/%d: %s", number, len(sessions), session.url)
             try:
