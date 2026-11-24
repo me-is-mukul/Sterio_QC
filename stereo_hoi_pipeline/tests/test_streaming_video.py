@@ -15,8 +15,10 @@ import pytest
 
 from test_mcap_reader import TOPICS, _schemas
 
-from video_pipeline.ingestion.mcap_reader import assemble_session, extract_segment, last_times_after
-from video_pipeline.qc.technical import DecodeSettings, decode_both
+from functools import partial
+
+from video_pipeline.ingestion.mcap_reader import assemble_session, extract_segment, last_times_after, stream_packets
+from video_pipeline.qc.technical import DecodeSettings, decode_recording
 from video_pipeline.segmentation.clip_writer import write_clip
 
 FFMPEG = shutil.which("ffmpeg")
@@ -111,10 +113,10 @@ def test_decode_both_eyes_streamed(recording, tmp_path):
     settings = DecodeSettings(fps=30, sample_step=60, sample_max_width=160, jpeg_quality=85, black_min_seconds=5,
                               black_pixel_threshold=0.1, black_picture_threshold=0.98, freeze_noise_db=-60,
                               freeze_min_seconds=5, timeout_seconds=120)
-    out = decode_both(FFMPEG, recording["open"], TOPICS["cameras"], recording["tables"], settings,
-                      sample_dirs={c: tmp_path / "s" / c for c in ("cam0", "cam1")},
-                      calib_dirs={c: tmp_path / "c" / c for c in ("cam0", "cam1")},
-                      calib_indices=[0, 120], log_dir=tmp_path / "log")
+    out = decode_recording(FFMPEG, partial(stream_packets, recording["open"], TOPICS["cameras"]), recording["tables"],
+                           settings, sample_dirs={c: tmp_path / "s" / c for c in ("cam0", "cam1")},
+                           calib_dirs={c: tmp_path / "c" / c for c in ("cam0", "cam1")},
+                           calib_indices=[0, 120], log_dir=tmp_path / "log")
     for cam in ("cam0", "cam1"):
         r = out[cam]
         assert r["returncode"] == 0 and r["decode_error_count"] == 0
@@ -132,7 +134,7 @@ def test_clip_is_identical_to_the_recording(recording, tmp_path):
     finalized = []
     recording["opened"].clear()
     info = write_clip(clip_dir=tmp_path / "clip_000", clip_id="clip_000", ffmpeg=FFMPEG, ffprobe=FFPROBE,
-                      open_segment=recording["open"], camera_topics=TOPICS["cameras"], tables=recording["tables"],
+                      stream=partial(stream_packets, recording["open"], TOPICS["cameras"]), tables=recording["tables"],
                       left_cam="cam1", right_cam="cam0", start=30, stop=150, fps=30, imu_t=recording["imu_t"],
                       imu=recording["imu"], first_frame_ns=int(recording["tables"]["cam1"]["t_ns"][0]), metadata={},
                       timeout_seconds=120, finalize=lambda p: finalized.append((p.name, hashlib.sha256(p.read_bytes()).hexdigest(),

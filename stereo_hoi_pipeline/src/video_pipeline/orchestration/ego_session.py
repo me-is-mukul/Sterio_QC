@@ -1,12 +1,15 @@
-"""Run the QA sheet on ONE recording (an MCAP session in Cloud Storage) and upload the result.
+"""Run the QA sheet on ONE recording (a session folder in Cloud Storage, any supported format) and
+upload the result. The recording format is detected from the folder's files (ingestion/formats);
+the steps below only use the format-independent index the format's reader writes.
 
 Steps (each records its config fingerprint in the manifest; a re-run skips completed steps whose
 configuration did not change, and redoes everything after the first step that runs again):
 
-    extract            stream each segment from Cloud Storage and index it (frame times, keyframes,
-                       IMU, calibration); no video is written to disk
-    technical          section 1: stream the segments again, straight into one FFmpeg per eye (full
-                       decode); the same pass writes the 2 s label frames and the calibration frames
+    extract            index every segment from Cloud Storage (frame times, keyframes, IMU,
+                       calibration); no video is written to disk
+    technical          section 1: stream the video again, straight into FFmpeg (one process per eye,
+                       or one for a side-by-side stream; full decode); the same pass writes the 2 s
+                       label frames and the calibration frames
     calibration        section 2 (rectified / unrectified, eye order)
     labelling          every model labels every sampled left-eye frame (cached per sample)
     content_recording  section 3, recording level
@@ -54,21 +57,15 @@ from video_pipeline.core.logging_setup import LoggingController, set_run_id, sta
 from video_pipeline.core.tools import resolve_executable
 from video_pipeline.inference.ego_labeller import FrameLabeller, Sample, VlmLabeller, label_samples
 from video_pipeline.inference.prompts import get_prompt
+from video_pipeline.ingestion.formats import RecordingReader, classify, make_reader
 from video_pipeline.ingestion.gcs import GcsStorage, SessionListing, SessionRef, guess_content_type
-from video_pipeline.ingestion.mcap_reader import (
-    CAMERA_KEYS,
-    assemble_session,
-    extract_segment,
-    last_times_after,
-    load_segment_summary,
-)
+from video_pipeline.ingestion.mcap_reader import CAMERA_KEYS, assemble_session, load_segment_summary
 from video_pipeline.orchestration.context import generate_run_id
 from video_pipeline.qc.technical import (
     DecodeSettings,
     calibration_frame_indices,
-    check_required_files,
     common_keyframes,
-    decode_both,
+    decode_recording,
     evaluate_technical,
     pair_eyes,
 )
@@ -160,6 +157,7 @@ class State:
     verdict: str | None = None
     fail_reasons: list[dict[str, Any]] = field(default_factory=list)
     data: dict[str, Any] = field(default_factory=dict)
+    reader: RecordingReader | None = None
 
     def fail(self, section: str, check: str, message: str) -> None:
         self.verdict = FAIL
@@ -210,21 +208,26 @@ def run_session(session: SessionRef, services: Services, *, force: bool, upload:
 def _run_locked(session: SessionRef, services: Services, paths: SessionPaths, *, upload: bool, until: str | None,
                 max_segments: int | None, argv: tuple[str, ...], started: float, force: bool) -> dict[str, Any]:
     cfg = services.config
-    listing = services.storage.list_session(session, session_json=cfg.get("source.session_json"),
-                                            segment_pattern=cfg.get("source.segment_pattern"))
-    if not listing.segments and listing.session_json is None and not listing.other:
+    objects = services.storage.list_objects(session.bucket, session.prefix)
+    if not objects:
         # Nothing at all: a wrong URL, not a recording with missing files. No report, nothing uploaded.
         raise IngestionError(f"No objects found at {session.url} (check the URL).")
-    if max_segments is not None:
-        listing = SessionListing(listing.session, listing.session_json, listing.segments[:max_segments], listing.other)
+    listing = classify(session, objects, cfg.get("source.segment_pattern"))
+    if listing.format is None:
+        raise IngestionError(f"{session.url} is not a recording in a known format (files: "
+                             f"{sorted(o.name[len(session.prefix):] for o in objects)[:10]}).")
+    listing = listing.limited(max_segments)
 
     manifest = _open_manifest(paths, session, listing, max_segments)
     set_run_id(manifest.run_id)
     services.logging_controller.attach_file(paths.logs / "processing.log", cfg.get("logging.file_level"))
     state = State(session, listing, paths, manifest, cfg, force=force)
+    # the recording's own small metadata files (session.json, calibration.json, ...) go to out/recording/
+    state.reader = make_reader(listing, services.storage, cfg, work_dir=paths.work, keep_dir=paths.out / "recording",
+                               max_segments=max_segments)
     try:
-        logger.info("Session %s | %d segments, %.2f GB | run %s", session.relative, len(listing.segments),
-                    listing.total_bytes / 1e9, manifest.run_id)
+        logger.info("Session %s | format %s | %d segments, %.2f GB | run %s", session.relative, listing.format,
+                    len(listing.segments), listing.total_bytes / 1e9, manifest.run_id)
         write_json_atomic(paths.out / "source_listing.json", {**session.describe(), **listing.to_dict(),
                                                                "max_segments": max_segments})
         write_text_atomic(paths.logs / "resolved_config.yaml", cfg.to_yaml())
@@ -334,6 +337,11 @@ def _step_fingerprint(cfg: ResolvedConfig, step: str, extra: Any = None) -> str:
     return sha256_json({"keys": {k: cfg.get(k) for k in STEP_CONFIG_KEYS.get(step, ())}, "extra": extra})
 
 
+def _step_extra(state: State, step: str) -> Any:
+    """Format-specific settings a step depends on (None for MCAP, so its fingerprints are unchanged)."""
+    return state.reader.fingerprint_extra() if step == "extract" and state.reader is not None else None
+
+
 def _run_steps(state: State, services: Services, until: str | None) -> None:
     functions: dict[str, Callable[[State, Services], dict[str, Any]]] = {
         "extract": _step_extract, "technical": _step_technical, "calibration": _step_calibration,
@@ -344,7 +352,7 @@ def _run_steps(state: State, services: Services, until: str | None) -> None:
     for step in STEPS:
         if state.verdict == FAIL:
             break
-        fingerprint = _step_fingerprint(state.config, step)
+        fingerprint = _step_fingerprint(state.config, step, _step_extra(state, step))
         record = state.manifest.stage(step)
         output = state.paths.out / f"_{step}.json"
         with stage_scope(step):
@@ -385,60 +393,21 @@ def _run_steps(state: State, services: Services, until: str | None) -> None:
 # Steps
 # ---------------------------------------------------------------------------------------------
 
-def _topics(cfg: ResolvedConfig) -> dict[str, Any]:
-    return cfg.get("topics")
-
-
-def segment_opener(state: State, services: Services):
-    """number -> context manager streaming that segment from Cloud Storage (exact listed generation)."""
-    bucket = state.config.get("source.bucket")
-    objects = dict(state.listing.segments)
-    chunk = int(state.config.get("source.read_chunk_mb") * (1 << 20))
-
-    @contextmanager
-    def open_segment(number: int):
-        reader = services.storage.open_reader(bucket, objects[number], chunk_bytes=chunk)
-        try:
-            yield reader
-        finally:
-            reader.close()
-
-    return open_segment
-
-
 def _step_extract(state: State, services: Services) -> dict[str, Any]:
-    cfg, paths, listing = state.config, state.paths, state.listing
-    bucket = cfg.get("source.bucket")
-    required = check_required_files({"segments": [{"number": n} for n, _ in listing.segments],
-                                     "session_json": listing.session_json})
-    if listing.session_json is not None:
-        services.storage.download(bucket, listing.session_json, paths.out / "session.json")
+    reader, paths = state.reader, state.paths
+    reader.fetch_metadata()
+    required = reader.required_files()
     failed = [c for c in required if not c["passed"]]
+    base = {"format": reader.format, "format_description": reader.description, "layout": reader.layout,
+            "codec": reader.codec, "required_files": required}
     if failed:
         logger.warning("Required files missing: %s", "; ".join(c["message"] for c in failed))
-        return {"extracted": False, "required_files": required,
+        return {"extracted": False, **base,
                 "fail_reasons": [{"section": "technical", "check": c["check"], "message": c["message"]} for c in failed]}
-
     paths.stream.mkdir(parents=True, exist_ok=True)
-    last: dict[str, int | None] = {"cam0": None, "cam1": None, "imu": None}
-    numbers = []
-    total = len(listing.segments)
-    opener = segment_opener(state, services)
-    for position, (number, obj) in enumerate(listing.segments, start=1):
-        numbers.append(number)
-        name = obj.name.rsplit("/", 1)[-1]
-        summary = load_segment_summary(paths.stream, number)
-        if summary is None or summary.get("file") != name:
-            t0 = time.perf_counter()
-            with opener(number) as stream:
-                summary = extract_segment(stream, number, name, paths.stream, _topics(cfg),
-                                          video_format=cfg.get("topics.video_format"), last_times=last)
-            logger.info("Segment %d/%d (%s, %.0f MB streamed): %d+%d frames, %d IMU samples | %.1f s",
-                        position, total, name, obj.size / 1e6, summary["cam0"]["frames"], summary["cam1"]["frames"],
-                        summary["imu"]["samples"], time.perf_counter() - t0)
-        last = last_times_after(summary, last)
+    numbers = reader.extract(paths.stream)
     counts = assemble_session(paths.stream, numbers)
-    return {"extracted": True, "segments": numbers, "required_files": required, **counts}
+    return {"extracted": True, **base, "segments": numbers, **counts}
 
 
 def _load_tables(paths: SessionPaths) -> tuple[dict[str, np.ndarray], np.ndarray, np.ndarray]:
@@ -477,7 +446,9 @@ def _step_technical(state: State, services: Services) -> dict[str, Any]:
     full = {cam: np.load(paths.stream / f"{cam}_all.npy") for cam in CAMERA_KEYS}
     imu_t = np.load(paths.stream / "imu_t.npy")
     calibration = _session_calibration(summaries)
-    nominal = (calibration["messages"].get("imu_info") or {}).get("update_rate_hz")
+    reader = state.reader
+    nominal = reader.imu_nominal_hz(calibration["messages"])
+    crops = reader.eye_crops(paths.stream) if reader.layout == "sbs" else None
     pairing = pair_eyes(full["cam0"], full["cam1"], tolerance_ns=int(tech["max_eye_offset_ms"] * 1e6),
                         max_edge_frames=tech["max_unpaired_edge_frames"])
     for path in (paths.stream / "cam0.npy", paths.stream / "cam1.npy"):
@@ -503,19 +474,29 @@ def _step_technical(state: State, services: Services) -> dict[str, Any]:
                                   freeze_noise_db=tech["freeze_noise_db"], freeze_min_seconds=tech["freeze_min_seconds"],
                                   timeout_seconds=tech["decode_timeout_seconds"])
         ffmpeg = resolve_executable(cfg.get("tools.ffmpeg"))
-        logger.info("Decoding both eyes (%d frames each = %.0f min of video), streamed from the bucket; "
-                    "progress every minute ...", n, n / settings.fps / 60)
-        decode = decode_both(ffmpeg, segment_opener(state, services), cfg.get("topics.cameras"), tables, settings,
-                             sample_dirs={cam: paths.samples / cam for cam in CAMERA_KEYS},
-                             calib_dirs={cam: paths.calib / cam for cam in CAMERA_KEYS},
-                             calib_indices=calib_indices, log_dir=paths.work / "ffmpeg")
+        logger.info("Decoding both eyes (%d frames each = %.0f min of video%s), streamed from the bucket; "
+                    "progress every minute ...", n, n / settings.fps / 60,
+                    f", side by side, eyes at x {crops['cam0']} and {crops['cam1']}" if crops else "")
+        decode = decode_recording(ffmpeg, reader.stream_packets_from(paths.stream), tables, settings,
+                                  sample_dirs={cam: paths.samples / cam for cam in CAMERA_KEYS},
+                                  calib_dirs={cam: paths.calib / cam for cam in CAMERA_KEYS},
+                                  calib_indices=calib_indices, log_dir=paths.work / "ffmpeg", layout=reader.layout,
+                                  codec=reader.codec, crops=crops, harmless_errors=reader.harmless_decode_errors)
         for cam, result in decode.items():
             logger.info("%s decoded in %.1f s: %s/%s frames, %d errors, %d samples", cam, result["elapsed_seconds"],
                         result["decoded_frames"], n, result["decode_error_count"], result["samples_written"])
     listing = state.listing.to_dict()
+    sequence = None
+    if reader.frame_counter:                   # host receive times: gaps from the camera's frame counter
+        parts = [paths.stream / f"seg_{n:05d}" / "seq.npy" for n in state.data["extract"]["segments"]]
+        if parts and all(p.is_file() for p in parts):
+            sequence = np.concatenate([np.load(p) for p in parts])
     result = evaluate_technical(listing=listing, segment_summaries=summaries, cam0=full["cam0"], cam1=full["cam1"],
                                 imu_t=imu_t, imu_nominal_hz=nominal, decode=decode, cfg=tech, pairing=pairing,
-                                paired_cam0=tables["cam0"] if pairing["ok"] else None)
+                                paired_cam0=tables["cam0"] if pairing["ok"] else None,
+                                required_checks=state.data["extract"]["required_files"],
+                                imu_unavailable=reader.imu_unavailable, frame_sequence=sequence,
+                                host_times=reader.host_clock)
     expected_samples = -(-n // step) if n else 0
     if decode is not None:
         for cam, d in decode.items():
@@ -525,7 +506,9 @@ def _step_technical(state: State, services: Services) -> dict[str, Any]:
                 raise PipelineError(f"{cam}: {d['calibration_frames_written']} calibration frames written, "
                                     f"{len(calib_indices)} expected")
     result.update(frames=n, sample_step_frames=step, samples=expected_samples, calibration_frame_indices=calib_indices,
-                  calibration_snapshot=calibration, decode=decode, imu_nominal_hz=nominal,
+                  calibration_snapshot=calibration, decode=decode, imu_nominal_hz=nominal, format=reader.format,
+                  layout=reader.layout, eye_crops=crops, imu_checked=reader.imu_unavailable is None,
+                  imu_not_checked_reason=reader.imu_unavailable,
                   fail_reasons=[{"section": "technical", "check": c["check"], "message": c["message"]}
                                 for c in result["checks"] if not c["passed"] and not c.get("informational")])
     for c in result["checks"]:
@@ -600,7 +583,7 @@ def _step_labelling(state: State, services: Services) -> dict[str, Any]:
     _tables, imu_t, imu = _load_tables(state.paths)
     for key, labeller in _labellers(services).items():
         t0 = time.perf_counter()
-        labeller.begin_session(samples, imu_t, imu)
+        labeller.begin_session(samples, imu_t, imu, imu_available=state.reader.imu_unavailable is None)
         results = label_samples(labeller, samples, cache_dir / f"labels_{key}.jsonl",
                                 max_failure_ratio=cfg.get("labelling.max_failure_ratio"))
         ok = sum(1 for r in results.values() if r.get("status") == "ok")
@@ -815,15 +798,20 @@ def _step_clips(state: State, services: Services) -> dict[str, Any]:
         finalize = upload_and_delete
     clips = []
     first_ns = int(tables[left]["t_ns"][0])
-    opener = segment_opener(state, services)
+    reader = state.reader
+    stream = reader.stream_packets_from(state.paths.stream)
+    crops = state.data["technical"].get("eye_crops")
+    meta["recording_format"] = reader.format
+    if reader.imu_unavailable:
+        meta["imu_note"] = reader.imu_unavailable
     for number, piece in enumerate(p for p in state.data["content_clips"]["pieces"] if p["kept"]):
         clip_id = f"clip_{number:03d}"
         info = write_clip(clip_dir=state.paths.clips / clip_id, clip_id=clip_id, ffmpeg=ffmpeg, ffprobe=ffprobe,
-                          open_segment=opener, camera_topics=cfg.get("topics.cameras"), tables=tables,
+                          stream=stream, tables=tables,
                           left_cam=left, right_cam=right, start=piece["start"], stop=piece["stop"],
                           fps=int(cfg.get("technical.expected_fps")), imu_t=imu_t, imu=imu, first_frame_ns=first_ns,
                           metadata=meta, timeout_seconds=cfg.get("technical.decode_timeout_seconds"),
-                          finalize=finalize)
+                          finalize=finalize, layout=reader.layout, codec=reader.codec, crops=crops)
         clips.append(info)
         logger.info("%s: %d frames, %.1f s, %d IMU samples", clip_id, info["frames"], info["duration_s"],
                     info["imu_samples"])
@@ -886,7 +874,9 @@ def _write_report(state: State, services: Services, upload_prefix: str | None, m
         "schema_version": REPORT_SCHEMA_VERSION,
         "verdict": verdict,
         "fail_reasons": state.fail_reasons,
-        "session": {**state.session.describe(), "segments": len(state.listing.segments),
+        "session": {**state.session.describe(), "format": state.listing.format,
+                    "format_description": state.reader.description if state.reader else None,
+                    "segments": len(state.listing.segments),
                     "bytes": state.listing.total_bytes, "identity": state.listing.identity()},
         "partial_test_run": max_segments is not None,
         "run_id": state.manifest.run_id,
@@ -904,6 +894,8 @@ def _write_report(state: State, services: Services, upload_prefix: str | None, m
     }
     if "extract" in d and not d["extract"].get("extracted"):
         report["technical"] = {"passed": False, "checks": d["extract"]["required_files"]}
+    if state.reader is not None and state.reader.imu_unavailable:
+        report["imu"] = {"checked": False, "reason": state.reader.imu_unavailable}
     if tech:
         report["technical"] = {k: v for k, v in tech.items() if k not in {"decode", "calibration_snapshot", "fail_reasons"}}
         report["technical"]["decode"] = {cam: {k: v for k, v in r.items() if k != "command"}

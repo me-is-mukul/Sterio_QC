@@ -1,4 +1,5 @@
-"""Command line for the egocentric QA batch (MCAP sessions in Cloud Storage).
+"""Command line for the egocentric QA batch (recordings in Cloud Storage, every supported format:
+MCAP, robocap, Hydra, EGO-CAM live and capture.egoc; the format of each session folder is detected).
 
     python scripts/run_gcs_batch.py --source gs://op-datoric/raw/Op_DD/31-10-2026/ --list-sessions
     python scripts/run_gcs_batch.py --source gs://op-datoric/raw/Op_DD/31-10-2026/ \
@@ -18,7 +19,7 @@ import io
 import sys
 from collections import defaultdict
 from collections.abc import Sequence
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 from video_pipeline import __version__
 from video_pipeline.core.config import find_project_root
@@ -28,6 +29,7 @@ from video_pipeline.core.errors import ConfigError, PipelineError
 from video_pipeline.core.gcp_auth import get_credentials
 from video_pipeline.core.io import utc_now, write_text_atomic
 from video_pipeline.core.logging_setup import LoggingController
+from video_pipeline.ingestion.formats import classify, detect_format
 from video_pipeline.ingestion.gcs import GcsStorage, SessionRef, parse_gs_url
 
 EXIT_OK, EXIT_ERRORS, EXIT_USAGE, EXIT_INTERRUPTED = 0, 1, 2, 130
@@ -36,9 +38,10 @@ SUMMARY_FIELDS = ["session", "status", "reasons", "kept_seconds", "clips", "cali
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="run_gcs_batch",
-                                description="Egocentric video QA for MCAP recordings in Google Cloud Storage.")
+                                description="Egocentric video QA for recordings in Google Cloud Storage "
+                                            "(MCAP, robocap, Hydra, EGO-CAM; the format is detected per session).")
     p.add_argument("--source", metavar="GS_URL",
-                   help="Folder to read recordings from (every session_* folder below it, in the numbered order "
+                   help="Folder to read recordings from (every recording folder below it, in the numbered order "
                         "--list-sessions shows). Default: source.bucket + source.raw_root of the config.")
     p.add_argument("--dest", metavar="GS_URL",
                    help="Folder to write results to; each result goes to <dest>/<path of the session below the "
@@ -90,8 +93,9 @@ def folder_prefix(url: str, what: str) -> tuple[str, str]:
 
 
 def source_root(prefix: str) -> str:
-    """The folder sessions are numbered and named below. A session folder given as the source is
-    itself the only session, so its parent folder is the root."""
+    """The folder sessions are numbered and named below (before the folder is listed). A folder named
+    session_* given as the source is itself the only session, so its parent folder is the root; for
+    other formats this is found out after listing (see session_root)."""
     parts = prefix.rstrip("/").split("/")
     if parts[-1].startswith("session_"):
         if len(parts) == 1:
@@ -100,28 +104,40 @@ def source_root(prefix: str) -> str:
     return prefix
 
 
-def discover_sessions(storage: GcsStorage, bucket: str, prefix: str, segment_pattern: str) -> tuple[list[dict], int]:
-    """MCAP sessions below a prefix, sorted by path: [{'url', 'bytes', 'files', 'segments'}], plus the
-    number of session_* folders skipped because they hold no MCAP segment (other recording formats)."""
-    import re  # noqa: PLC0415
+def session_root(bucket: str, prefix: str, found: Sequence[dict]) -> str:
+    """Root below which the found sessions are named: the source folder itself, or its parent when the
+    source folder is itself a recording (it must then not be in the bucket root)."""
+    if any(s["url"] == f"gs://{bucket}/{prefix}" for s in found):
+        parts = prefix.rstrip("/").split("/")
+        if len(parts) == 1:
+            raise PipelineError("A recording folder directly in the bucket root cannot be a source folder.")
+        return "/".join(parts[:-1]) + "/"
+    return prefix
 
-    pattern = re.compile(segment_pattern)
-    sizes: dict[str, int] = defaultdict(int)
-    files: dict[str, int] = defaultdict(int)
-    segments: dict[str, int] = defaultdict(int)
+
+def discover_sessions(storage: GcsStorage, bucket: str, prefix: str, segment_pattern: str) -> tuple[list[dict], int]:
+    """Recordings below a prefix, sorted by path: [{'url', 'format', 'bytes', 'files', 'segments'}], plus
+    the number of folders skipped because their files are not a recording in a known format.
+
+    A folder is a recording when the files directly inside it match a format (ingestion/formats);
+    sub-folders are looked at separately (robocap keeps one session per sub-folder)."""
+    folders: dict[str, list] = defaultdict(list)
     for obj in storage.list_objects(bucket, prefix):
-        parts = PurePosixPath(obj.name).parts
-        idx = next((i for i, part in enumerate(parts[:-1]) if part.startswith("session_")), None)
-        if idx is None:
+        if obj.name.endswith("/"):
             continue
-        folder = "/".join(parts[: idx + 1]) + "/"
-        sizes[folder] += obj.size
-        files[folder] += 1
-        if idx == len(parts) - 2 and pattern.fullmatch(parts[-1]):
-            segments[folder] += 1
-    found = [{"url": f"gs://{bucket}/{f}", "bytes": sizes[f], "files": files[f], "segments": segments[f]}
-             for f in sorted(sizes) if segments[f]]
-    return found, sum(1 for f in sizes if not segments[f])
+        folders[obj.name.rsplit("/", 1)[0] + "/" if "/" in obj.name else ""].append(obj)
+    found, skipped = [], 0
+    for folder in sorted(folders):
+        names = [o.name[len(folder):] for o in folders[folder]]
+        fmt = detect_format(names, segment_pattern)
+        if fmt is None or not folder:
+            skipped += 1
+            continue
+        listing = classify(SessionRef(bucket=bucket, raw_root="", relative=folder.rstrip("/")), folders[folder],
+                           segment_pattern)
+        found.append({"url": f"gs://{bucket}/{folder}", "format": fmt, "bytes": listing.total_bytes,
+                      "files": len(listing.objects()), "segments": len(listing.segments)})
+    return found, skipped
 
 
 def select_range(items: Sequence, start: int | None, end: int | None) -> list:
@@ -140,10 +156,14 @@ def format_session_list(found: Sequence[dict], skipped: int, start: int | None, 
     first = 1 if start is None else start
     last = len(found) if end is None else end
     marked = start is not None or end is not None
-    lines = [f"{'>' if marked and first <= n <= last else ' '}{n:4d}  {s['bytes'] / 1e9:7.2f} GB"
+    lines = [f"{'>' if marked and first <= n <= last else ' '}{n:4d}  {s['format']:<12} {s['bytes'] / 1e9:8.2f} GB"
              f"  {s['segments']:3d} segments  {s['url']}" for n, s in enumerate(found, start=1)]
+    by_format: dict[str, int] = defaultdict(int)
+    for s in found:
+        by_format[s["format"]] += 1
     lines.append(f"{len(found)} sessions, {sum(s['bytes'] for s in found) / 1e9:.1f} GB"
-                 + (f"; {skipped} session folder(s) without MCAP segments not listed" if skipped else ""))
+                 + (f" ({', '.join(f'{k}: {v}' for k, v in sorted(by_format.items()))})" if found else "")
+                 + (f"; {skipped} folder(s) without a recording in a known format not listed" if skipped else ""))
     if found and marked:
         chosen = found[first - 1:last]
         lines.append(f"'>' = selected by --start {first} --end {last}: {len(chosen)} sessions, "
@@ -210,7 +230,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 else:
                     bucket, prefix = config.get("source.bucket"), config.get("source.raw_root")
                 found, skipped = discover_sessions(storage, bucket, prefix, pattern)
-            except PipelineError as exc:
+            except (PipelineError, ConfigError) as exc:
                 print(f"Listing: {exc}", file=sys.stderr)
                 return EXIT_USAGE
             print(format_session_list(found, skipped, args.start, args.end))
@@ -225,7 +245,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 bucket, prefix = folder_prefix(args.source, "--source")
                 found, _ = discover_sessions(storage, bucket, prefix, pattern)
                 if not found:
-                    raise PipelineError(f"No MCAP sessions found below {args.source}.")
+                    raise PipelineError(f"No recordings in a known format found below {args.source}.")
+                root = session_root(bucket, prefix, found)
+                if root != config.get("source.raw_root"):
+                    # the source folder is itself a recording: name it relative to its parent
+                    overrides["source.raw_root"] = root
+                    config = load_ego_configuration(project_root, args.config, overrides)
                 sessions = [SessionRef.from_url(s["url"], expected_bucket=config.get("source.bucket"),
                                                 raw_root=config.get("source.raw_root")) for s in found]
             else:
@@ -233,7 +258,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                       "--session URL or --sessions-file FILE.", file=sys.stderr)
                 return EXIT_USAGE
             sessions = select_range(sessions, args.start, args.end)
-        except PipelineError as exc:
+        except (PipelineError, ConfigError) as exc:
             print(f"Session list: {exc}", file=sys.stderr)
             return EXIT_USAGE
         if len({s.relative for s in sessions}) != len(sessions):

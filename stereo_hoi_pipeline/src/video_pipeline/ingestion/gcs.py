@@ -1,16 +1,15 @@
-"""Google Cloud Storage access for MCAP sessions: list, stream (segments), download (small files), upload.
+"""Google Cloud Storage access for recordings: list, stream (segments), download (small files), upload.
 
-A *session* is one folder ``<raw_root><path>/session_*/`` holding ``ego_NNNN.mcap`` segments and
-``session.json``. Results go to ``<processed_root><path>/session_*/`` (the same relative path).
-Nothing is ever written below ``raw_root``.
+A *session* is one folder ``<raw_root><path>/`` whose files form one recording in one of the
+supported formats (see ingestion/formats). Results go to ``<processed_root><path>/`` (the same
+relative path). Nothing is ever written below ``raw_root``.
 """
 
 from __future__ import annotations
 
 import logging
-import re
-from collections.abc import Iterable
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
 from video_pipeline.core.errors import IngestionError
@@ -59,8 +58,8 @@ class SessionRef:
             raise IngestionError(f"'{url}' is not below gs://{bucket}/{raw_root} (source.raw_root).")
         relative = prefix[len(raw_root):].strip("/")
         parts = PurePosixPath(relative).parts
-        if not parts or not parts[-1].startswith("session_") or any(p in {".", ".."} for p in parts):
-            raise IngestionError(f"'{url}' does not name a session folder (expected .../session_<...>/).")
+        if not parts or any(p in {".", ".."} for p in parts):
+            raise IngestionError(f"'{url}' does not name a session folder below gs://{bucket}/{raw_root}.")
         return cls(bucket=bucket, raw_root=raw_root, relative="/".join(parts))
 
     @property
@@ -87,56 +86,64 @@ class SessionRef:
 
 
 @dataclass(frozen=True)
+class Segment:
+    """One numbered piece of a recording: its file(s) by role, e.g. {'mcap': ...} or
+    {'video_left_front.mp4': ..., 'video_right_front.mp4': ..., 'imu_left.db': ...}."""
+
+    number: int
+    files: Mapping[str, ObjectInfo]
+
+    @property
+    def size(self) -> int:
+        return sum(o.size for o in self.files.values())
+
+    @property
+    def name(self) -> str:
+        """A readable name for logs: the file name, or the common prefix of a multi-file segment."""
+        names = sorted(o.name.rsplit("/", 1)[-1] for o in self.files.values())
+        if len(names) == 1:
+            return names[0]
+        return f"segment {self.number} ({len(names)} files)"
+
+
+@dataclass(frozen=True)
 class SessionListing:
     session: SessionRef
-    session_json: ObjectInfo | None
-    segments: tuple[tuple[int, ObjectInfo], ...]   # (segment number, object), sorted by number
-    other: tuple[ObjectInfo, ...]
+    format: str | None                              # see ingestion/formats; None = not a known recording
+    files: Mapping[str, ObjectInfo]                 # session-level files by name (session.json, frames.idx, ...)
+    segments: tuple[Segment, ...]                   # sorted by number
+    other: tuple[ObjectInfo, ...] = field(default=())   # everything else (not part of the recording)
+
+    @property
+    def session_json(self) -> ObjectInfo | None:
+        return self.files.get("session.json")
+
+    def objects(self) -> list[ObjectInfo]:
+        return [o for s in self.segments for o in s.files.values()] + list(self.files.values())
 
     @property
     def total_bytes(self) -> int:
-        return sum(o.size for _, o in self.segments) + (self.session_json.size if self.session_json else 0)
+        return sum(o.size for o in self.objects())
 
     def identity(self) -> str:
         """Fingerprint of exactly which object generations make up this session."""
-        objects = [o.to_dict() for _, o in self.segments]
-        if self.session_json:
-            objects.append(self.session_json.to_dict())
-        return sha256_json(sorted(objects, key=lambda o: o["name"]))
+        return sha256_json(sorted((o.to_dict() for o in self.objects()), key=lambda o: o["name"]))
+
+    def limited(self, max_segments: int | None) -> SessionListing:
+        if max_segments is None:
+            return self
+        return SessionListing(self.session, self.format, self.files, self.segments[:max_segments], self.other)
 
     def to_dict(self) -> dict:
         return {
-            "session_json": self.session_json.to_dict() if self.session_json else None,
-            "segments": [{"number": n, **o.to_dict()} for n, o in self.segments],
+            "format": self.format,
+            "files": {k: o.to_dict() for k, o in self.files.items()},
+            "segments": [{"number": s.number, "files": {k: o.to_dict() for k, o in s.files.items()}}
+                         for s in self.segments],
             "other_objects": [o.to_dict() for o in self.other],
             "total_bytes": self.total_bytes,
             "identity": self.identity(),
         }
-
-
-def classify_session_objects(session: SessionRef, objects: Iterable[ObjectInfo], *, session_json: str,
-                             segment_pattern: str) -> SessionListing:
-    pattern = re.compile(segment_pattern)
-    seg: list[tuple[int, ObjectInfo]] = []
-    sjson = None
-    other = []
-    for obj in objects:
-        rest = obj.name[len(session.prefix):]
-        if "/" in rest:                      # nested objects are not part of the recording
-            other.append(obj)
-            continue
-        match = pattern.fullmatch(rest)
-        if match:
-            seg.append((int(match.group(1)), obj))
-        elif rest == session_json:
-            sjson = obj
-        else:
-            other.append(obj)
-    seg.sort(key=lambda item: item[0])          # numeric order, not string order
-    numbers = [n for n, _ in seg]
-    if len(numbers) != len(set(numbers)):
-        raise IngestionError(f"{session.url}: duplicate segment numbers {numbers}")
-    return SessionListing(session=session, session_json=sjson, segments=tuple(seg), other=tuple(other))
 
 
 class GcsStorage:
@@ -152,9 +159,6 @@ class GcsStorage:
         except Exception as exc:  # noqa: BLE001 (google exceptions vary; reported with context)
             raise IngestionError(f"Cannot list gs://{bucket}/{prefix}: {exc}") from exc
 
-    def list_session(self, session: SessionRef, *, session_json: str, segment_pattern: str) -> SessionListing:
-        objects = self.list_objects(session.bucket, session.prefix)
-        return classify_session_objects(session, objects, session_json=session_json, segment_pattern=segment_pattern)
 
     def exists(self, bucket: str, name: str) -> bool:
         try:

@@ -151,6 +151,37 @@ def eye_order(cv2, matches: Sequence[tuple[np.ndarray, np.ndarray]], cam0, cam1,
     return result
 
 
+def raw_eye_order(cv2, pairs: Sequence[tuple[Path, Path]], cfg: Mapping[str, Any]) -> dict[str, Any]:
+    """Eye order without a calibration: horizontal disparity of RANSAC-filtered matches in the raw
+    pixels. Lens distortion bends the values but not their sign for scene points in front."""
+    sift = cv2.SIFT_create(nfeatures=4000)
+    disparities = []
+    for path0, path1 in pairs:
+        g0 = cv2.imread(str(path0), cv2.IMREAD_GRAYSCALE)
+        g1 = cv2.imread(str(path1), cv2.IMREAD_GRAYSCALE)
+        if g0 is None or g1 is None:
+            continue
+        a, b = match_pair(cv2, g0, g1, sift, cfg["ratio_test"])
+        if len(a) < cfg["min_matches_per_pair"]:
+            continue
+        keep = _inliers(cv2, a, b, cfg["ransac_threshold_px"])
+        disparities.append(a[keep, 0] - b[keep, 0])
+    d = np.concatenate(disparities) if disparities else np.zeros(0)
+    threshold = cfg["eye_order_min_disparity_px"]
+    positive, negative = int(np.sum(d > threshold)), int(np.sum(d < -threshold))
+    decided = positive + negative
+    result: dict[str, Any] = {"points_with_disparity": decided, "cam0_left_votes": positive, "cam1_left_votes": negative,
+                              "median_disparity_px": round(float(np.median(d)), 3) if len(d) else None,
+                              "left": None, "determined": False, "method": "raw pixels (no calibration)"}
+    if decided >= cfg["eye_order_min_points"]:
+        share = max(positive, negative) / decided
+        result["agreement"] = round(share, 4)
+        if share >= cfg["eye_order_min_agreement"]:
+            result["left"] = "cam0" if positive > negative else "cam1"
+            result["determined"] = True
+    return result
+
+
 def check_calibration(pairs: Sequence[tuple[Path, Path]], calibration: Mapping[str, Any],
                       cfg: Mapping[str, Any]) -> dict[str, Any]:
     """``calibration``: the first intrinsics/extrinsics messages (dicts) from the recording."""
@@ -161,9 +192,15 @@ def check_calibration(pairs: Sequence[tuple[Path, Path]], calibration: Mapping[s
     missing = [k for k in ("cam0_intrinsics", "cam1_intrinsics", "stereo_extrinsics") if k not in calibration]
     if missing:
         fallback = "cam0" if labelled_left == "calibration" else labelled_left
-        return {**base, "result": "unrectified", "reason": f"calibration messages missing: {missing}",
-                "eye_order": {"left": fallback, "determined": False, "eyes_swapped": False,
-                              "labelled_left": fallback, "note": "no calibration: eye order unknown, cam0 assumed left"}}
+        order = raw_eye_order(cv2, pairs, cfg)
+        left = order["left"] if order["determined"] else fallback
+        order.update(left=left, eyes_swapped=left != fallback, labelled_left=fallback,
+                     note="no factory calibration: eye order from the raw (distorted) pixels"
+                     if order["determined"] else "no factory calibration and no clear disparity: cam0 assumed left")
+        return {**base, "calibration_source": None, "result": "unrectified",
+                "reason": f"no factory calibration in the recording ({', '.join(missing)} missing)",
+                "transform_reading": None, "median_vertical_px": None, "p95_vertical_px": None, "inlier_matches": 0,
+                "pairs_with_matches": 0, "eye_order": order}
     cam0 = camera_model(calibration["cam0_intrinsics"])
     cam1 = camera_model(calibration["cam1_intrinsics"])
     base["intrinsics"] = {"cam0": calibration["cam0_intrinsics"], "cam1": calibration["cam1_intrinsics"]}

@@ -1,9 +1,11 @@
 """Section 1 of the QA sheet: technical checks on a whole recording.
 
-* ``decode_both``  one streaming read of the recording feeds one FFmpeg process per eye (stdin):
-  full decode (integrity), blackdetect + freezedetect, and in the same pass the sampled frames
-  for labelling (every `step` frames) and the full-resolution frames for the calibration check.
-  The video itself is never written to disk.
+* ``decode_recording``  one streaming read of the recording feeds one FFmpeg process per video
+  stream (stdin): a separate process per eye for two-stream formats, one process for a
+  side-by-side stream that is cut into its two eyes. Each process does the full decode
+  (integrity), blackdetect + freezedetect per eye (results in detect_<cam>.txt), and in the same
+  pass writes the sampled frames for labelling (every `step` frames) and the full-resolution
+  frames for the calibration check. The video itself is never written to disk.
 * ``evaluate_technical``  pure function: every check of section 1 with its numbers.
 
 The raw streams get the container clock n / fps (`-framerate`), so FFmpeg frame n is table row n.
@@ -19,7 +21,7 @@ import shutil
 import subprocess
 import threading
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -28,14 +30,13 @@ import numpy as np
 
 from video_pipeline.core.errors import ToolExecutionError
 from video_pipeline.core.pipe_feeder import PipeFeeder
-from video_pipeline.ingestion.mcap_reader import SegmentOpener, stream_packets
 
-_BLACK = re.compile(r"black_start:\s*([-\d.]+)\s+black_end:\s*([-\d.]+)")
-_FREEZE_START = re.compile(r"freeze_start:\s*([-\d.]+)")
-_FREEZE_END = re.compile(r"freeze_end:\s*([-\d.]+)")
 _LEVEL = re.compile(r"\[(error|fatal|panic)\]")
 
 logger = logging.getLogger(__name__)
+
+# (requests, sink) -> packets per camera; see ingestion/formats/base.py
+PacketStreamer = Callable[[Mapping[str, tuple[np.ndarray, int, int]], Callable[[str, int, bytes], None]], dict]
 
 
 @dataclass(frozen=True)
@@ -52,55 +53,93 @@ class DecodeSettings:
     timeout_seconds: float
 
 
+@dataclass(frozen=True)
+class EyeOutput:
+    cam: str
+    crop: Sequence[int] | None    # [x0, x1) inside the decoded picture (side-by-side), None = whole picture
+    sample_dir: Path
+    calib_dir: Path
+
+
 def jpeg_qscale(quality: int) -> int:
     """1-100 JPEG quality -> FFmpeg mjpeg -q:v (2 best .. 31 worst)."""
     return max(2, min(31, round(2 + (100 - quality) * 29 / 99)))
 
 
-def build_decode_command(ffmpeg: str, settings: DecodeSettings, *, sample_dir: Path, calib_dir: Path,
-                         calib_indices: Sequence[int], progress_path: Path) -> list[str]:
+def detection_file(cam: str) -> str:
+    """Per-eye black/freeze results, written by FFmpeg's metadata filter (relative to the log dir)."""
+    return f"detect_{cam}.txt"
+
+
+def build_decode_command(ffmpeg: str, settings: DecodeSettings, *, eyes: Sequence[EyeOutput], calib_indices: Sequence[int],
+                         progress_path: Path, codec: str = "hevc") -> list[str]:
+    """FFmpeg command for one input stream. Run it with the log dir as working directory (the
+    detection files are written there by name, which avoids escaping paths inside the filter graph)."""
     s = settings
+    parts = []
+    if len(eyes) > 1:
+        parts.append("[0:v]split=" + str(len(eyes)) + "".join(f"[in{i}]" for i in range(len(eyes))))
     branches = 3 if calib_indices else 2
-    graph = (
-        f"[0:v]split={branches}[d][s]{'[c]' if calib_indices else ''};"
-        f"[d]blackdetect=d={s.black_min_seconds}:pix_th={s.black_pixel_threshold}:pic_th={s.black_picture_threshold},"
-        f"freezedetect=n={s.freeze_noise_db}dB:d={s.freeze_min_seconds}[dout];"
-        f"[s]select='not(mod(n,{s.sample_step}))',scale=w='min({s.sample_max_width},iw)':h=-2[sout]"
-    )
-    if calib_indices:
-        expr = "+".join(f"eq(n,{i})" for i in calib_indices)
-        graph += f";[c]select='{expr}'[cout]"
+    for i, eye in enumerate(eyes):
+        source = f"[in{i}]" if len(eyes) > 1 else "[0:v]"
+        crop = f"crop=w={eye.crop[1] - eye.crop[0]}:h=ih:x={eye.crop[0]}:y=0," if eye.crop else ""
+        parts.append(f"{source}{crop}split={branches}[d{i}][s{i}]{f'[c{i}]' if calib_indices else ''}")
+        parts.append(f"[d{i}]blackdetect=d={s.black_min_seconds}:pix_th={s.black_pixel_threshold}:"
+                     f"pic_th={s.black_picture_threshold},freezedetect=n={s.freeze_noise_db}dB:d={s.freeze_min_seconds},"
+                     f"metadata=mode=print:file={detection_file(eye.cam)}[dout{i}]")
+        parts.append(f"[s{i}]select='not(mod(n,{s.sample_step}))',scale=w='min({s.sample_max_width},iw)':h=-2[sout{i}]")
+        if calib_indices:
+            expr = "+".join(f"eq(n,{k})" for k in calib_indices)
+            parts.append(f"[c{i}]select='{expr}'[cout{i}]")
     cmd = [ffmpeg, "-hide_banner", "-nostats", "-loglevel", "level+info", "-y",
-           "-f", "hevc", "-framerate", str(s.fps), "-i", "pipe:0",
-           "-filter_complex", graph,
-           "-map", "[dout]", "-f", "null", "-",
-           "-map", "[sout]", "-fps_mode", "passthrough", "-q:v", str(jpeg_qscale(s.jpeg_quality)),
-           "-start_number", "0", str(sample_dir / "%06d.jpg")]
-    if calib_indices:
-        cmd += ["-map", "[cout]", "-fps_mode", "passthrough", "-start_number", "0", str(calib_dir / "%03d.png")]
+           "-f", codec, "-framerate", str(s.fps), "-i", "pipe:0", "-filter_complex", ";".join(parts)]
+    for i, eye in enumerate(eyes):
+        cmd += ["-map", f"[dout{i}]", "-f", "null", "-",
+                "-map", f"[sout{i}]", "-fps_mode", "passthrough", "-q:v", str(jpeg_qscale(s.jpeg_quality)),
+                "-start_number", "0", str(eye.sample_dir / "%06d.jpg")]
+        if calib_indices:
+            cmd += ["-map", f"[cout{i}]", "-fps_mode", "passthrough", "-start_number", "0", str(eye.calib_dir / "%03d.png")]
     cmd += ["-progress", str(progress_path)]
     return cmd
 
 
-def parse_detections(stderr: str, total_seconds: float) -> dict[str, Any]:
-    black = [(float(a), float(b)) for a, b in _BLACK.findall(stderr)]
-    freezes: list[tuple[float, float]] = []
-    open_start = None
-    for line in stderr.splitlines():
-        if "freezedetect" not in line or "lavfi.freezedetect" not in line:
+def parse_detection_file(path: Path, total_seconds: float, black_min_seconds: float,
+                         freeze_min_seconds: float) -> dict[str, list[tuple[float, float]]]:
+    """Black and frozen intervals from a metadata=print file. A stretch still open at the end of the
+    stream lasts until the end. Stretches shorter than the minimum are dropped (blackdetect marks
+    every black start in the metadata, its d= only filters the log)."""
+    black: list[tuple[float, float]] = []
+    frozen: list[tuple[float, float]] = []
+    black_start = freeze_start = None
+    text = path.read_text(encoding="utf-8", errors="replace") if path.is_file() else ""
+    for line in text.splitlines():
+        key, _, value = line.strip().partition("=")
+        try:
+            number = float(value)
+        except ValueError:
             continue
-        m = _FREEZE_START.search(line)
-        if m:
-            open_start = float(m.group(1))
-            continue
-        m = _FREEZE_END.search(line)
-        if m and open_start is not None:
-            freezes.append((open_start, float(m.group(1))))
-            open_start = None
-    if open_start is not None:                # frozen until the end of the stream
-        freezes.append((open_start, total_seconds))
-    errors = [line.strip() for line in stderr.splitlines() if _LEVEL.search(line)]
-    return {"black": black, "frozen": freezes, "decode_errors": errors}
+        if key == "lavfi.black_start":
+            black_start = number
+        elif key == "lavfi.black_end" and black_start is not None:
+            black.append((black_start, number))
+            black_start = None
+        elif key == "lavfi.freezedetect.freeze_start":
+            freeze_start = number
+        elif key == "lavfi.freezedetect.freeze_end" and freeze_start is not None:
+            frozen.append((freeze_start, number))
+            freeze_start = None
+    if black_start is not None:
+        black.append((black_start, total_seconds))
+    if freeze_start is not None:
+        frozen.append((freeze_start, total_seconds))
+    return {"black": [(a, b) for a, b in black if b - a >= black_min_seconds - 1e-6],
+            "frozen": [(a, b) for a, b in frozen if b - a >= freeze_min_seconds - 1e-6]}
+
+
+def decode_errors(stderr: str, harmless: Sequence[str] = ()) -> list[str]:
+    """Error-level lines of the FFmpeg log, without messages known to be harmless for this format."""
+    return [line.strip() for line in stderr.splitlines()
+            if _LEVEL.search(line) and not any(h in line for h in harmless)]
 
 
 def _last_progress_frame(path: Path) -> int | None:
@@ -169,49 +208,61 @@ class _ProgressReporter:
             logger.info(format_decode_progress(done, self._total, time.perf_counter() - self._started, self._fps))
 
 
-def decode_both(ffmpeg: str, open_segment: SegmentOpener, camera_topics: Sequence[str],
-                tables: Mapping[str, np.ndarray], settings: DecodeSettings, *, sample_dirs: Mapping[str, Path],
-                calib_dirs: Mapping[str, Path], calib_indices: Sequence[int], log_dir: Path,
-                progress_interval_seconds: float = 60.0) -> dict[str, dict[str, Any]]:
-    """Decode both eyes in ONE streaming read of the segments: each eye's packets go straight from the
-    source into its own FFmpeg process (bounded in-memory queues; nothing video-sized on disk).
+def decode_recording(ffmpeg: str, stream: PacketStreamer, tables: Mapping[str, np.ndarray], settings: DecodeSettings, *,
+                     sample_dirs: Mapping[str, Path], calib_dirs: Mapping[str, Path], calib_indices: Sequence[int],
+                     log_dir: Path, layout: str = "pair", codec: str = "hevc",
+                     crops: Mapping[str, Sequence[int]] | None = None, harmless_errors: Sequence[str] = (),
+                     progress_interval_seconds: float = 60.0) -> dict[str, dict[str, Any]]:
+    """Decode the recording in ONE streaming read: the packets go straight from the source into FFmpeg
+    (bounded in-memory queues; nothing video-sized on disk). ``layout`` 'pair': one process per eye;
+    'sbs': one process for the shared stream (cam0's rows), cut into the eyes by ``crops``.
     Logs a progress line every `progress_interval_seconds` (0 = off)."""
     log_dir.mkdir(parents=True, exist_ok=True)
+    if layout == "sbs":
+        if not crops:
+            raise ToolExecutionError("side-by-side decode needs the eye crops")
+        groups = {"sbs": [EyeOutput(cam, crops[cam], sample_dirs[cam], calib_dirs[cam]) for cam in tables]}
+        requests = {"cam0": (tables["cam0"], 0, len(tables["cam0"]))}
+        route = {"cam0": "sbs"}
+    else:
+        groups = {cam: [EyeOutput(cam, None, sample_dirs[cam], calib_dirs[cam])] for cam in tables}
+        requests = {cam: (t, 0, len(t)) for cam, t in tables.items()}
+        route = {cam: cam for cam in tables}
     total = max((len(t) for t in tables.values()), default=0)
-    with _ProgressReporter({cam: log_dir / f"decode_{cam}.progress" for cam in tables}, total, settings.fps,
+    with _ProgressReporter({g: log_dir / f"decode_{g}.progress" for g in groups}, total, settings.fps,
                            progress_interval_seconds):
-        return _decode_both(ffmpeg, open_segment, camera_topics, tables, settings, sample_dirs=sample_dirs,
-                            calib_dirs=calib_dirs, calib_indices=calib_indices, log_dir=log_dir)
+        return _decode(ffmpeg, stream, tables, settings, groups=groups, requests=requests, route=route,
+                       calib_indices=calib_indices, log_dir=log_dir, codec=codec, harmless_errors=harmless_errors)
 
 
-def _decode_both(ffmpeg: str, open_segment: SegmentOpener, camera_topics: Sequence[str],
-                 tables: Mapping[str, np.ndarray], settings: DecodeSettings, *, sample_dirs: Mapping[str, Path],
-                 calib_dirs: Mapping[str, Path], calib_indices: Sequence[int], log_dir: Path) -> dict[str, dict[str, Any]]:
+def _decode(ffmpeg: str, stream: PacketStreamer, tables: Mapping[str, np.ndarray], settings: DecodeSettings, *,
+            groups: Mapping[str, Sequence[EyeOutput]], requests, route: Mapping[str, str], calib_indices: Sequence[int],
+            log_dir: Path, codec: str, harmless_errors: Sequence[str]) -> dict[str, dict[str, Any]]:
     procs: dict[str, subprocess.Popen] = {}
     feeders: dict[str, PipeFeeder] = {}
     commands: dict[str, list[str]] = {}
     handles = {}
     started = time.perf_counter()
     try:
-        for cam in tables:
-            for folder in (sample_dirs[cam], calib_dirs[cam]):
-                if folder.exists():
-                    shutil.rmtree(folder)
-                folder.mkdir(parents=True)
-            progress = log_dir / f"decode_{cam}.progress"
+        for group, eyes in groups.items():
+            for eye in eyes:
+                for folder in (eye.sample_dir, eye.calib_dir):
+                    if folder.exists():
+                        shutil.rmtree(folder)
+                    folder.mkdir(parents=True)
+                (log_dir / detection_file(eye.cam)).unlink(missing_ok=True)
+            progress = log_dir / f"decode_{group}.progress"
             progress.unlink(missing_ok=True)
-            commands[cam] = build_decode_command(ffmpeg, settings, sample_dir=sample_dirs[cam],
-                                                 calib_dir=calib_dirs[cam], calib_indices=calib_indices,
-                                                 progress_path=progress)
-            handles[cam] = (log_dir / f"decode_{cam}.stderr.log").open("w", encoding="utf-8", errors="replace")
+            commands[group] = build_decode_command(ffmpeg, settings, eyes=eyes, calib_indices=calib_indices,
+                                                   progress_path=progress.resolve(), codec=codec)
+            handles[group] = (log_dir / f"decode_{group}.stderr.log").open("w", encoding="utf-8", errors="replace")
             try:
-                procs[cam] = subprocess.Popen(commands[cam], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
-                                              stderr=handles[cam])
+                procs[group] = subprocess.Popen(commands[group], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                                                stderr=handles[group], cwd=str(log_dir))
             except OSError as exc:
                 raise ToolExecutionError(f"Could not start FFmpeg: {exc}") from exc
-            feeders[cam] = PipeFeeder(procs[cam])
-        stream_packets(open_segment, camera_topics, {cam: (t, 0, len(t)) for cam, t in tables.items()},
-                       lambda cam, _row, data: feeders[cam].write(data))
+            feeders[group] = PipeFeeder(procs[group])
+        stream(requests, lambda cam, _row, data: feeders[route[cam]].write(data))
     except BaseException:
         for proc in procs.values():
             proc.kill()
@@ -226,37 +277,45 @@ def _decode_both(ffmpeg: str, open_segment: SegmentOpener, camera_topics: Sequen
         feeder.close()
     results = {}
     try:
-        for cam, proc in procs.items():
+        for group, proc in procs.items():
             remaining = max(1.0, settings.timeout_seconds - (time.perf_counter() - started))
             try:
                 returncode = proc.wait(timeout=remaining)
             except subprocess.TimeoutExpired as exc:
                 for p in procs.values():
                     p.kill()
-                raise ToolExecutionError(f"FFmpeg decode of {cam} timed out after {settings.timeout_seconds}s") from exc
-            results[cam] = returncode
+                raise ToolExecutionError(f"FFmpeg decode of {group} timed out after {settings.timeout_seconds}s") from exc
+            results[group] = returncode
     finally:
         for handle in handles.values():
             handle.close()
     out = {}
-    for cam, returncode in results.items():
-        stderr = (log_dir / f"decode_{cam}.stderr.log").read_text(encoding="utf-8", errors="replace")
-        detections = parse_detections(stderr, len(tables[cam]) / settings.fps)
-        out[cam] = {
-            "cam": cam,
-            "command": commands[cam],
-            "returncode": returncode,
-            "elapsed_seconds": round(time.perf_counter() - started, 2),
-            "decoded_frames": _last_progress_frame(log_dir / f"decode_{cam}.progress"),
-            "expected_frames": int(len(tables[cam])),
-            "decode_errors": detections["decode_errors"][:50],
-            "decode_error_count": len(detections["decode_errors"]),
-            "black_intervals": detections["black"],
-            "frozen_intervals": detections["frozen"],
-            "samples_written": len(list(sample_dirs[cam].glob("*.jpg"))),
-            "calibration_frames_written": len(list(calib_dirs[cam].glob("*.png"))),
-            "stderr_tail": stderr.strip().splitlines()[-8:] if returncode != 0 else [],
-        }
+    for group, returncode in results.items():
+        stderr = (log_dir / f"decode_{group}.stderr.log").read_text(encoding="utf-8", errors="replace")
+        errors = decode_errors(stderr, harmless_errors)
+        decoded = _last_progress_frame(log_dir / f"decode_{group}.progress")
+        for eye in groups[group]:
+            n = len(tables[eye.cam])
+            detections = parse_detection_file(log_dir / detection_file(eye.cam), n / settings.fps,
+                                              settings.black_min_seconds, settings.freeze_min_seconds)
+            out[eye.cam] = {
+                "cam": eye.cam,
+                "process": group,
+                "crop_x": list(eye.crop) if eye.crop else None,
+                "command": commands[group],
+                "returncode": returncode,
+                "elapsed_seconds": round(time.perf_counter() - started, 2),
+                "decoded_frames": decoded,
+                "expected_frames": int(n),
+                "decode_errors": errors[:50],
+                "decode_error_count": len(errors),
+                "ignored_harmless_errors": list(harmless_errors),
+                "black_intervals": detections["black"],
+                "frozen_intervals": detections["frozen"],
+                "samples_written": len(list(eye.sample_dir.glob("*.jpg"))),
+                "calibration_frames_written": len(list(eye.calib_dir.glob("*.png"))),
+                "stderr_tail": stderr.strip().splitlines()[-8:] if returncode != 0 else [],
+            }
     return out
 
 
@@ -299,12 +358,21 @@ def check_segment_topics(segment_summaries: Sequence[Mapping[str, Any]]) -> dict
     wrong_format = {s["number"]: (s["cam0"]["wrong_format"], s["cam1"]["wrong_format"]) for s in segment_summaries
                     if s["cam0"]["wrong_format"] or s["cam1"]["wrong_format"]}
     ok = not bad and not wrong_format
-    msg = "every segment has both cameras and the IMU" if ok else \
-        f"segments missing core topics: {bad}" + (f"; non-h265 frames: {wrong_format}" if wrong_format else "")
+    msg = "every segment has all its parts (both cameras, IMU where the format has one)" if ok else \
+        f"segments with missing or unreadable parts: {bad}" + \
+        (f"; frames in an unexpected codec: {wrong_format}" if wrong_format else "")
     return _check("core_topics_present", ok, msg, segments_missing_topics=bad, wrong_format_frames=wrong_format)
 
 
-def frame_timing(table: np.ndarray, expected_fps: float) -> dict[str, Any]:
+def frame_timing(table: np.ndarray, expected_fps: float, sequence: np.ndarray | None = None,
+                 mean_rate: bool = False) -> dict[str, Any]:
+    """Frame rate, gaps and drops of one camera.
+
+    Times from the camera/sensor clock (default): rate = 1 / median interval, gaps = time differences.
+    Host receive times (EGO-CAM) jitter by tens of ms although no frame is lost, so the rate is the mean
+    over the recording (``mean_rate``); with ``sequence`` (the camera's capture counter) gaps and lost
+    frames come from the counter (a jump of k = k - 1 lost frames, k / fps seconds), otherwise from the
+    receive times."""
     t = table["t_ns"].astype(np.int64)
     if len(t) < 2:
         return {"frames": int(len(t)), "fps": None, "max_gap_s": None, "non_monotonic": 0, "dropped_frames_est": 0,
@@ -312,7 +380,39 @@ def frame_timing(table: np.ndarray, expected_fps: float) -> dict[str, Any]:
     dt = np.diff(t)
     median = float(np.median(dt))
     nominal = 1e9 / expected_fps
+    if sequence is not None and len(sequence) == len(t):
+        steps = np.diff(np.asarray(sequence, dtype=np.int64))
+        span = float(t[-1] - t[0])
+        jumps = steps[steps > 1]
+        return {
+            "frames": int(len(t)),
+            "clock": "host receive time: rate = mean over the recording, gaps from the camera frame counter",
+            "fps": round((len(t) - 1) * 1e9 / span, 4) if span > 0 else None,
+            "median_interval_ms": round(median / 1e6, 4),
+            "host_max_interval_s": round(float(dt.max()) / 1e9, 4),
+            "max_gap_s": round(float(steps.max()) / expected_fps, 4),
+            "non_monotonic": int(np.sum(dt <= 0) + np.sum(steps <= 0)),
+            "gaps_over_1_5_frames": int(len(jumps)),
+            "dropped_frames_est": int(np.sum(jumps - 1)),
+            "duration_s": round(span / 1e9 + 1 / expected_fps, 3),
+        }
     gaps = dt[dt > 1.5 * nominal]
+    span = float(t[-1] - t[0])
+    if mean_rate:
+        rate = (len(t) - 1) * 1e9 / span if span > 0 else None
+        lost = max(0, int(round(span / nominal)) - (len(t) - 1))
+        return {
+            "frames": int(len(t)),
+            "clock": "host receive time: rate = mean over the recording, gaps from the receive times",
+            "fps": round(rate, 4) if rate else None,
+            "median_interval_ms": round(median / 1e6, 4),
+            "min_interval_ms": round(float(dt.min()) / 1e6, 4),
+            "max_gap_s": round(float(dt.max()) / 1e9, 4),
+            "non_monotonic": int(np.sum(dt <= 0)),
+            "gaps_over_1_5_frames": int(len(gaps)),
+            "dropped_frames_est": lost,
+            "duration_s": round(span / 1e9 + 1 / expected_fps, 3),
+        }
     return {
         "frames": int(len(t)),
         "fps": round(1e9 / median, 4) if median > 0 else None,
@@ -387,18 +487,25 @@ def evaluate_technical(*, listing: Mapping[str, Any], segment_summaries: Sequenc
                        cam0: np.ndarray | None, cam1: np.ndarray | None, imu_t: np.ndarray | None,
                        imu_nominal_hz: float | None, decode: Mapping[str, Mapping[str, Any]] | None,
                        cfg: Mapping[str, Any], pairing: Mapping[str, Any] | None = None,
-                       paired_cam0: np.ndarray | None = None) -> dict[str, Any]:
+                       paired_cam0: np.ndarray | None = None,
+                       required_checks: Sequence[Mapping[str, Any]] | None = None,
+                       imu_unavailable: str | None = None,
+                       frame_sequence: np.ndarray | None = None, host_times: bool = False) -> dict[str, Any]:
     """All section-1 checks. ``cfg`` is the 'technical' config section. ``cam0``/``cam1`` are the full
     frame tables (timing is checked on them); ``pairing`` is pair_eyes(); ``paired_cam0`` the cam0 rows
-    of the paired range (length and IMU coverage refer to it). Missing inputs = not evaluated."""
-    checks = check_required_files(listing)
+    of the paired range (length and IMU coverage refer to it). ``required_checks``: the format's file
+    checks (default: the MCAP ones). ``imu_unavailable``: why the format has no readable IMU (its IMU
+    checks are then reported as not checked). ``frame_sequence``: the camera's frame counter per row
+    when the times are host receive times (see frame_timing). Missing inputs = not evaluated."""
+    checks = [dict(c) for c in required_checks] if required_checks is not None else check_required_files(listing)
     if segment_summaries:
         checks.append(check_segment_topics(segment_summaries))
     fps = float(cfg["expected_fps"])
     info: dict[str, Any] = {}
 
     if cam0 is not None and cam1 is not None:
-        timing = {"cam0": frame_timing(cam0, fps), "cam1": frame_timing(cam1, fps)}
+        timing = {cam: frame_timing(table, fps, frame_sequence, mean_rate=host_times)
+                  for cam, table in (("cam0", cam0), ("cam1", cam1))}
         info["frame_timing"] = timing
         for cam, tm in timing.items():
             ok = (tm["frames"] >= 2 and tm["fps"] is not None and abs(tm["fps"] - fps) <= cfg["fps_tolerance"]
@@ -421,7 +528,9 @@ def evaluate_technical(*, listing: Mapping[str, Any], segment_summaries: Sequenc
                              f"recording lasts {duration} s (need >= {cfg['min_recording_seconds']} s for a 30 s piece)",
                              duration_s=duration))
 
-        if imu_t is not None:
+        if imu_unavailable:
+            checks.append(_check("imu_not_checked", True, imu_unavailable, informational=True))
+        elif imu_t is not None:
             checks.extend(_imu_checks(imu_t, base, imu_nominal_hz, cfg))
 
     if decode is not None:

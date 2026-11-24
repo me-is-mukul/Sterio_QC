@@ -1,8 +1,11 @@
-# Egocentric QA on MCAP recordings (Cloud Storage → `processed/`)
+# Egocentric QA on recordings in Cloud Storage (→ `processed/`)
 
 `scripts/run_gcs_batch.py` applies the "Egocentric video QA: pass / fail criteria" sheet to
 recordings in `gs://op-datoric/raw/` and writes one result folder per recording to
 `gs://op-datoric/processed/`. Settings: [`configs/ego_qa.yaml`](../configs/ego_qa.yaml).
+It reads every recording format in the bucket (MCAP, robocap, Hydra, EGO-CAM live, EGO-CAM
+`capture.egoc`) and recognises the format of each session folder by itself; see
+[Recording formats](#recording-formats).
 It is separate from the MP4 HOI pipeline (`scripts/run_pipeline.py`), which is unchanged.
 
 ## Run it
@@ -23,7 +26,7 @@ python scripts/run_gcs_batch.py --sessions-file sessions_10.txt
 
 | Option | Meaning |
 |---|---|
-| `--source URL` | Folder to read recordings from: every `session_*` folder with MCAP segments below it, numbered 1, 2, … in path order (as `--list-sessions` prints them; folder names sort as text, so `01-11-2026` comes before `31-10-2026`). A single session folder works too. Default: `source.bucket` + `source.raw_root` (`gs://op-datoric/raw/`). Nothing is ever written below it. |
+| `--source URL` | Folder to read recordings from: every folder below it whose files are a recording in a known format, numbered 1, 2, … in path order (as `--list-sessions` prints them, with each one's format; folder names sort as text, so `01-11-2026` comes before `31-10-2026`). A single recording folder works too. Default: `source.bucket` + `source.raw_root` (`gs://op-datoric/raw/`). Nothing is ever written below it. |
 | `--dest URL` | Folder to write results to. Each recording's result goes to `<dest>/<path of the recording below the source folder>/`, e.g. source `…/raw/Op_DD/31-10-2026/`, dest `…/processed/Op_DD/31-10-2026/` → `…/processed/Op_DD/31-10-2026/SDC509/session_00005-…/`. May be in another bucket. Must not be inside the source folder (or contain it). Default: `gs://op-datoric/processed/`. |
 | `--start N` / `--end N` | Process only recordings N…M of the numbered list (1 = first, `--end` included). Either may be left out (from the first / to the last). Also applies to a `--session`/`--sessions-file` list. |
 | `--list-sessions [URL]` | Print the numbered list for `--source` (or URL) with sizes, mark what `--start`/`--end` select, then exit. Processes nothing. |
@@ -33,12 +36,13 @@ python scripts/run_gcs_batch.py --sessions-file sessions_10.txt
 | `--force` | Redo a session even if `processed/…/qa_report.json` exists, and replace that result: its old `qa_report.json` is deleted first, the new files overwrite the old ones, objects the new result does not have are deleted, the new `qa_report.json` comes last. Needs `storage.objects.delete`. Also discards local partial work. |
 | `--config FILE` | Override `configs/ego_qa.yaml` (only existing keys; `models:` is replaced as a whole). |
 | `--until STEP` | Stop after a step (no report, no upload). For testing. |
-| `--max-segments N` | TEST ONLY: first N segments of each session (the report says `partial_test_run: true`). |
+| `--max-segments N` | TEST ONLY: first N segments of each session (the report says `partial_test_run: true`). For the one-file formats (Hydra `video.h265`, `capture.egoc`) a segment is a chunk of `formats.*.chunk_frames` frames. |
 
 Exit code 0: every session ended PASS, FAIL or SKIPPED. 1: at least one ERROR (a technical problem
 of the pipeline or a model, not a QA verdict; re-run to continue). 130: interrupted.
-A URL with no objects at all is an ERROR (nothing is written); a session folder that exists but
-lacks `session.json` or `ego_0000.mcap`, or has a gap in its segment numbers, is a FAIL.
+A URL with no objects at all, or a folder that is not a recording in a known format, is an ERROR
+(nothing is written); a recording that lacks a required file (per format, see Recording formats)
+or has a gap in its segment numbers is a FAIL.
 
 A run that stops (crash, Ctrl+C, lost SSH) continues where it stopped when started again with the
 same command: finished steps are skipped, labelled frames are cached, extracted segments are kept.
@@ -59,24 +63,81 @@ The batch starts the models before the first recording, so a missing library sho
 
 | Step | Sheet | What it does |
 |---|---|---|
-| `extract` | 1 | Lists the session; checks `session.json`, `ego_0000.mcap` and gap-free segment numbers. Then streams each segment from the bucket (exact listed object version, MCAP chunk CRCs checked) and indexes it: per frame its capture time, keyframe flag, size and position; IMU; calibration. Channels are found by topic name. No video is written. |
-| `technical` | 1 | Pairs the eyes by capture time (≤ 3 unpaired frames trimmed at each end; any unpaired frame inside = FAIL). Frame timing (≈ 30 fps, no gap > 0.1 s), IMU (same clock, covers the video, no gap > 50 ms, rate steady within 5 % per 10 s), full decode of both eyes (no errors, every frame), black/frozen < 50 %, length ≥ 30 s. The decode streams the segments again straight into one FFmpeg per eye; the same pass writes the 2 s label frames and the calibration frames. |
+| `extract` | 1 | Lists the session and detects its format; checks the format's required files and gap-free segment numbers. Then indexes every segment from the bucket (exact listed object version): per frame its capture time, keyframe flag, size and position; IMU; calibration. No video is written. |
+| `technical` | 1 | Pairs the eyes by capture time (≤ 3 unpaired frames trimmed at each end; any unpaired frame inside = FAIL). Frame timing (≈ 30 fps, no gap > 0.1 s), IMU (same clock, covers the video, no gap > 50 ms, rate steady within 5 % per 10 s; not checked for EGO-CAM), full decode of both eyes (no errors, every frame), black/frozen < 50 % per eye, length ≥ 30 s. The decode streams the video again straight into FFmpeg (one process per eye, or one for a side-by-side picture that is cut into the two eyes); the same pass writes the 2 s label frames and the calibration frames. Progress is logged every minute. |
 | `calibration` | 2 | Rectified if median vertical offset ≤ 1.5 px and p95 ≤ 5 px on ≥ 200 inlier matches over ≥ 10 held-out frame pairs; else unrectified. Eye order decided from the images. Never fails a recording. |
 | `labelling` | 4 | One left-eye frame every 2 s. Default: MediaPipe counts the wearer's hands (both/one/none); the motion check marks it idle or moving (see Models). |
 | `content_recording` | 3 | Off by default (`content.enabled: false`; the report says `"content": {"checked": false}`). With a content model: minor in ≥ 2 frames, lens covered/smudged or third-person in > 50 % of frames, or "no real work" for a strip of 16 frames over the recording → FAIL. |
 | `cropping` | 4 | Cut ≥ 10 s where all models say idle, and ≥ 10 s where all say no wearer hand. Pieces start/end on keyframes shared by both eyes; pieces < 30 s dropped; nothing ≥ 30 s left → FAIL. |
 | `content_clips` | 3 | Off by default (every piece is kept). With a content model: private moment in ≥ 2 frames, or "one trivial motion repeated" for a 12-frame strip → drop the piece. |
-| `clips` | — | Writes each kept piece: `left.mp4`, `right.mp4` (packets streamed from the bucket and copied, no re-encode, verified with ffprobe), `frame_times.csv`, `imu.csv`, `clip.json`. Each verified MP4 is uploaded and deleted before the next one is written. |
+| `clips` | — | Writes each kept piece: `left.mp4` + `right.mp4` (two-stream formats) or one `stereo_sbs.mp4` (side-by-side formats; each eye's x range is in `clip.json`), packets streamed from the bucket and copied, no re-encode, verified with ffprobe; plus `frame_times.csv`, `imu.csv`, `clip.json`. Each verified MP4 is uploaded and deleted before the next one is written. |
 
 Then `qa_report.json` is written and the rest is uploaded, `qa_report.json` last (it marks the
 result as complete). Local working files are deleted after a successful upload.
 
+## Recording formats
+
+The format of a folder is decided from the names of the files directly inside it
+(`ingestion/formats/detect.py`); sub-folders are separate sessions. `--list-sessions` shows each
+recording's format; folders that match no format (macOS index folders, empty folders) are counted
+as "not a recording" and skipped. On 01-11-2026 the bucket holds 453 recordings: 205 MCAP, 237
+robocap, 6 EGO-CAM live, 5 `capture.egoc`.
+
+| Format | Files in the session folder | Eyes | Frame times | IMU |
+|---|---|---|---|---|
+| `mcap` | `ego_NNNN.mcap` (from 0), `session.json` | two HEVC streams | device clock | in the MCAP, same clock |
+| `robocap` | `robocap_segmentN_<file>` (from 1, about 10 min each): six MP4 cameras, `imu_left.db`, `imu_right.db`, `mag_middle.db` | `video_left_front.mp4` + `video_right_front.mp4` (`formats.robocap.cameras`) | each MP4's `comment` tag = its first frame's device time (µs) + MP4 times | `imu_left.db` (SQLite, raw units, ns, same clock) |
+| `hydra` | `video.h265`, `frames.idx`, `h265_frame_meta.csv`, `h265_imu.csv`, `meta.json`, `session.json`, `stereo_calibration.bin` | one side-by-side HEVC picture, 3840x1200: left half / right half | sensor time per eye (`frame_pts_us`) | `h265_imu.csv` (deg/s, g; 500 Hz, same clock) |
+| `egocam_live` | `video_live_NNNN.mp4` (30 s each, from 0), `frame_map.csv`, `calibration.json`, `metadata.json` | one side-by-side HEVC picture, 4000x1200: x 160-2080 and 2080-4000 (`calibration.json` `eye_crop_x`) | host receive time (`frame_map.csv`) + the camera's capture counter | inside each frame's barcode: **not checked** |
+| `egocam_egoc` | `capture.egoc`, `calibration.json`, `metadata.json` | same picture, as JPEGs (MJPEG) | host receive time per frame | inside the barcode: **not checked** |
+
+Required files (missing = FAIL): MCAP `session.json` + `ego_0000.mcap`; robocap `robocap_segment1_…`;
+Hydra `video.h265`, `frames.idx`, `h265_frame_meta.csv`; EGO-CAM live `video_live_0000.mp4` +
+`frame_map.csv`; egoc `capture.egoc`. Every format: segment numbers without gaps; in every segment
+both cameras (and the IMU where the format has one) readable.
+
+Facts the readers rely on, checked on real files on 24-11-2026:
+
+* **robocap**: one video track per MP4, index (`moov`) after the video data, no B-frames, keyframe
+  every ~30 frames; parameter sets only in the MP4 header, so they are put in front of every
+  keyframe when streaming. Segments follow each other with one frame interval. The left/right front
+  cameras start ~30 µs apart. IMU about 203 Hz. **IMU units are not documented**: accel 8192 per g
+  (the ±4 g range; 1 g measured at rest), gyro 65.5 per deg/s (the ±500 deg/s range; fitted from the
+  recordings as 58-71 per deg/s). If the device team gives other ranges, change
+  `formats.robocap.gyro_lsb_per_dps` / `accel_lsb_per_g`. There is no calibration file: the
+  calibration check reports `unrectified` and decides the eye order from the raw pixels.
+* **Hydra**: `frames.idx` gives every frame's byte range in `video.h265`; a keyframe with
+  parameter sets every 30 frames; the eyes are ~30 µs apart. `stereo_calibration.bin` is in an
+  unknown binary format and is not used (calibration as for robocap). The 100 GB files are indexed
+  in chunks of `formats.hydra.chunk_frames` frames, so an interrupted index resumes.
+* **EGO-CAM** (both): `calibration.json` holds OpenCV fisheye (Kannala-Brandt) K/D per camera and the
+  stereo R/T; it is used for the calibration check. It names cam0 the *right* camera; the image
+  check agrees (left eye = cam1). Frame times are when the computer received the frame, which jitter
+  by tens of ms (a 108 ms wait with no frame lost was seen), so the frame rate is the mean over the
+  recording; for EGO-CAM live gaps and lost frames come from the camera's capture counter
+  (`capture_seq`), for `capture.egoc` (whose counter only numbers written frames) from the receive
+  times. `capture.egoc` records are `EGF2`, frame number, time (µs), length, a checksum of unknown
+  kind (not verified), then one JPEG. The camera's JPEGs carry an "AVI1" header block that FFmpeg
+  reports as an error on every frame although the picture decodes; exactly that message is ignored.
+  A last frame cut off because the recording stopped while writing is a note, not a FAIL.
+* **EGO-CAM IMU**: the 300 Hz IMU is only inside a barcode in every frame (the strip at x < 160).
+  Decoding it needs the device team's `tools/imu_from_video.py`; until then the report says
+  `"imu": {"checked": false, ...}`, the IMU checks are skipped, and the idle check uses the
+  picture alone.
+
+Adding a format: write a reader in `ingestion/formats/` (index each segment into the common tables
+with `write_segment`, stream packets with `_segment_packets`), add its file-name rule to
+`detect.py`, and register it in `formats/__init__.py`.
+
 ## Disk use on the VM: no raw video is stored
 
-The `.mcap` recordings are never saved on the VM: every pass reads them from the bucket as a
-stream (ranged reads of the exact listed object version) and passes the video packets through
+The recordings' video files are never saved on the VM: every pass reads them from the bucket as
+a stream (ranged reads of the exact listed object version) and passes the video packets through
 memory straight to FFmpeg. Each recording is read up to three times: index, decode, and the parts
-that become clips. Reads inside the same region are free.
+that become clips (MP4 formats index from the file's small `moov` box only, so their index pass
+reads about 100 kB per file). Small sensor files (robocap's SQLite IMU, a few MB per segment) are
+downloaded, read and deleted; large CSV files (Hydra's `h265_imu.csv`, up to 4 GB) are parsed
+while streaming.
 
 What is written locally (`work.directory`, per recording), and when it goes away:
 
@@ -99,9 +160,10 @@ gs://op-datoric/processed/Op_DD/<date>/<device>/<session>/
   qa_report.json        verdict PASS|FAIL, fail_reasons, every check with its numbers   (uploaded last)
   calibration.json      rectified|unrectified, vertical offsets, eye order, intrinsics/extrinsics used
   labels.csv            one row per 2 s sample: hands, idle/moving (with its numbers), idle/no_hands decision, brightness, sharpness, head motion
-  session.json          copy of the recording's session.json
-  source_listing.json   the exact objects (name, generation, checksum) that were processed
-  clips/clip_NNN/       left.mp4  right.mp4  frame_times.csv  imu.csv  clip.json
+  recording/            copies of the recording's small metadata files (session.json, meta.json,
+                        calibration.json, metadata.json, ... depending on the format)
+  source_listing.json   the format and the exact objects (name, generation, checksum) that were processed
+  clips/clip_NNN/       left.mp4 right.mp4 (or stereo_sbs.mp4)  frame_times.csv  imu.csv  clip.json
   labels/               raw per-model answers (jsonl), strip answers, per-sample decisions
   logs/                 manifest.json  processing.log  resolved_config.yaml
   _<step>.json          intermediate result of each step
@@ -116,8 +178,9 @@ gs://op-datoric/processed/_batches/<batch id>/  sessions.txt  summary.csv
   done. Objects of an earlier result or an interrupted attempt that the new result does not have are
   deleted just before the new `qa_report.json` is uploaded. Nothing outside the session's own result
   folder is ever written or deleted.
-* Clip MP4s use the nominal 30 fps clock; the measured capture time of every frame is in
-  `frame_times.csv` (device monotonic clock, ns). IMU rows are on the same clock.
+* Clip MP4s use the nominal 30 fps clock; the measured time of every frame is in
+  `frame_times.csv` (ns; the clock depends on the format, see Recording formats). IMU rows are on
+  the same clock. EGO-CAM clips have an empty `imu.csv` (the IMU is not decoded yet).
 
 ## Models (`models:` in the config)
 
@@ -207,4 +270,8 @@ See talking_to_mukul.md, section 1, for the data format. Findings the code relie
 MCAP indexing and packet streaming on a synthetic recording with the device's schemas, the full
 streaming decode + clip path on real HEVC video (needs FFmpeg with libx265; clip frames are checked
 to be identical to the source), session paths, configuration validation, content rules and answer
-validation, the motion idle check and the answer cache.
+validation, the motion idle check and the answer cache. `tests/test_formats.py` builds a small
+session in each of the other formats (robocap, Hydra, EGO-CAM live, `capture.egoc`; real HEVC/JPEG
+video) and runs it through detection, indexing, decoding (per-eye black detection on a
+side-by-side picture) and clips that must be bit-identical to the source, plus the whole pipeline
+on a robocap and an EGO-CAM session.

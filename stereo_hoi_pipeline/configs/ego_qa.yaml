@@ -56,6 +56,27 @@ topics:
   imu_extrinsics: /ego/imu/0/extrinsics
   video_format: h265
 
+# Recording formats. The format of every session folder is detected from its file names (see
+# docs/ego_qa.md, "Recording formats"): mcap (above), robocap, hydra, egocam_live, egocam_egoc.
+formats:
+  robocap:
+    # The camera pair checked as the two eyes (robocap has six cameras per segment).
+    cameras: [video_left_front.mp4, video_right_front.mp4]
+    imu_file: imu_left.db
+    # ICM-42688-P raw units. Accel: +-4 g range (1 g = 8192, checked at rest). Gyro: +-500 deg/s
+    # range, estimated from the recordings (fit 58-71 LSB per deg/s; the sensor's ranges are
+    # 32.8 / 65.5 / 131), not documented by the device team.
+    gyro_lsb_per_dps: 65.5
+    accel_lsb_per_g: 8192
+  hydra:
+    # video.h265 can be 100 GB: it is indexed in chunks of this many frames (resumable).
+    chunk_frames: 18000
+    default_width: 3840          # if meta.json is missing; each eye is one half
+  egocam:
+    chunk_frames: 18000          # capture.egoc is scanned in chunks of this many frames (resumable)
+    # Eye x ranges when calibration.json has none (cam0, cam1); x < 160 is the IMU barcode strip.
+    default_eye_crop_x: [[160, 2080], [2080, 4000]]
+
 # Section 1: technical checks (whole recording). Any failure = FAIL.
 technical:
   expected_fps: 30

@@ -53,6 +53,14 @@ _SCHEMA: dict[str, tuple[type, ...]] = {
     "topics.imu_info": (str,),
     "topics.imu_extrinsics": (str,),
     "topics.video_format": (str,),
+    "formats.robocap.cameras": (list,),
+    "formats.robocap.imu_file": (str,),
+    "formats.robocap.gyro_lsb_per_dps": _N,
+    "formats.robocap.accel_lsb_per_g": _N,
+    "formats.hydra.chunk_frames": (int,),
+    "formats.hydra.default_width": (int,),
+    "formats.egocam.chunk_frames": (int,),
+    "formats.egocam.default_eye_crop_x": (list,),
     "technical.expected_fps": _N,
     "technical.fps_tolerance": _N,
     "technical.max_frame_gap_seconds": _N,
@@ -172,6 +180,14 @@ def validate_ego_config(data: Mapping[str, Any]) -> None:
               "must not contain each other")
     check(processed_bucket(data) != "", "'source.processed_bucket' must not be empty (null = same as source.bucket)")
     check(1 <= get("source.read_chunk_mb") <= 256, "'source.read_chunk_mb' must be 1..256")
+    check(len(get("formats.robocap.cameras")) == 2, "'formats.robocap.cameras' must name exactly two camera files")
+    check(get("formats.robocap.gyro_lsb_per_dps") > 0 and get("formats.robocap.accel_lsb_per_g") > 0,
+          "robocap IMU scales must be > 0")
+    check(get("formats.hydra.chunk_frames") >= 300 and get("formats.egocam.chunk_frames") >= 300,
+          "'formats.*.chunk_frames' must be >= 300")
+    crops = get("formats.egocam.default_eye_crop_x")
+    check(len(crops) == 2 and all(isinstance(c, list) and len(c) == 2 and c[0] < c[1] for c in crops),
+          "'formats.egocam.default_eye_crop_x' must be two [start, end] ranges")
     try:
         pattern = re.compile(get("source.segment_pattern"))
         check(pattern.groups == 1, "'source.segment_pattern' must have exactly one group (the segment number)")

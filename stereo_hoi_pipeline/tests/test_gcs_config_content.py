@@ -12,7 +12,9 @@ from video_pipeline.core.ego_config import load_ego_configuration
 from video_pipeline.core.errors import ConfigError, IngestionError
 from video_pipeline.inference.ego_labeller import validate_answer
 from video_pipeline.inference.prompts import EGO_FRAME_SCHEMA
-from video_pipeline.ingestion.gcs import ObjectInfo, SessionRef, classify_session_objects, parse_gs_url
+from video_pipeline.core.hashing import sha256_json
+from video_pipeline.ingestion.formats import classify
+from video_pipeline.ingestion.gcs import ObjectInfo, SessionRef, parse_gs_url
 
 RAW = "gs://op-datoric/raw/Op_DD/01-11-2026/SDC001/session_00002-1793528549/"
 
@@ -28,7 +30,7 @@ def test_session_ref():
 @pytest.mark.parametrize("url", [
     "gs://other/raw/Op_DD/x/session_1/",          # wrong bucket
     "gs://op-datoric/processed/Op_DD/session_1/",  # not under raw/
-    "gs://op-datoric/raw/Op_DD/01-11-2026/",       # not a session folder
+    "gs://op-datoric/raw/",                        # the source root itself, not a folder below it
     "gs://op-datoric/raw/../session_1/",           # path tricks
     "https://storage.googleapis.com/op-datoric/raw/x/session_1/",
 ])
@@ -50,16 +52,19 @@ def _obj(name, size=1):
 def test_classify_segments_numeric_order_and_extras():
     s = SessionRef.from_url(RAW, expected_bucket="op-datoric", raw_root="raw/")
     p = s.prefix
-    listing = classify_session_objects(s, [_obj(p + "ego_0010.mcap"), _obj(p + "ego_0002.mcap"), _obj(p + "ego_10000.mcap"),
-                                           _obj(p + "session.json"), _obj(p + "notes.txt"), _obj(p + "sub/ego_0001.mcap")],
-                                       session_json="session.json", segment_pattern=r"^ego_(\d+)\.mcap$")
-    assert [n for n, _ in listing.segments] == [2, 10, 10000]
+    objects = [_obj(p + "ego_0010.mcap"), _obj(p + "ego_0002.mcap"), _obj(p + "ego_10000.mcap"),
+               _obj(p + "session.json"), _obj(p + "notes.txt"), _obj(p + "sub/ego_0001.mcap")]
+    listing = classify(s, objects)
+    assert listing.format == "mcap"
+    assert [seg.number for seg in listing.segments] == [2, 10, 10000]
     assert listing.session_json.name.endswith("session.json")
     assert {o.name.rsplit("/", 1)[-1] for o in listing.other} == {"notes.txt", "ego_0001.mcap"}
-    assert listing.identity() == classify_session_objects(s, [_obj(p + "session.json"), _obj(p + "ego_10000.mcap"),
-                                                              _obj(p + "ego_0002.mcap"), _obj(p + "ego_0010.mcap")],
-                                                          session_json="session.json",
-                                                          segment_pattern=r"^ego_(\d+)\.mcap$").identity()
+    assert listing.identity() == classify(s, [_obj(p + "session.json"), _obj(p + "ego_10000.mcap"),
+                                              _obj(p + "ego_0002.mcap"), _obj(p + "ego_0010.mcap")]).identity()
+    # identical to the identity of earlier versions (segments + session.json), so runs in progress resume
+    old = sha256_json(sorted([o.to_dict() for o in objects[:4]], key=lambda o: o["name"]))
+    assert listing.identity() == old
+    assert len(listing.limited(2).segments) == 2 and listing.limited(None) is listing
 
 
 def test_default_config_is_valid():

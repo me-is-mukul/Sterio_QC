@@ -1,4 +1,7 @@
-"""Write one kept piece as a clip: both eyes as MP4 (packets copied, no re-encode) + times + IMU.
+"""Write one kept piece as a clip: the video as MP4 (packets copied, no re-encode) + times + IMU.
+
+Two-stream recordings give left.mp4 and right.mp4; side-by-side recordings (one picture holds both
+eyes) give one stereo_sbs.mp4, with each eye's x range in clip.json.
 
 The piece [start, stop) starts on a keyframe shared by both eyes. Its exact HEVC packets are streamed
 from the recording (only the segments that hold them) straight into FFmpeg (`-c copy`), so the clip
@@ -28,7 +31,10 @@ from video_pipeline.core.errors import SegmentationError, ToolExecutionError
 from video_pipeline.core.io import write_json_atomic
 from video_pipeline.core.pipe_feeder import PipeFeeder
 from video_pipeline.core.tools import run_command
-from video_pipeline.ingestion.mcap_reader import IMU_COLUMNS, SegmentOpener, parameter_set_prefix, stream_packets
+from video_pipeline.ingestion.mcap_reader import IMU_COLUMNS, parameter_set_prefix
+
+# (requests, sink) -> packets per camera; see ingestion/formats/base.py
+PacketStreamer = Callable[[Mapping[str, tuple[np.ndarray, int, int]], Callable[[str, int, bytes], None]], dict]
 
 
 def _parameter_sets_row(table: np.ndarray, start: int) -> int | None:
@@ -41,14 +47,15 @@ def _parameter_sets_row(table: np.ndarray, start: int) -> int | None:
     return int(earlier[-1])
 
 
-def remux_streamed(ffmpeg: str, open_segment: SegmentOpener, camera_topics: Sequence[str], cam: str,
-                   table: np.ndarray, start: int, stop: int, fps: int, output: Path, timeout_seconds: float) -> None:
+def remux_streamed(ffmpeg: str, stream: PacketStreamer, cam: str, table: np.ndarray, start: int, stop: int, fps: int,
+                   output: Path, timeout_seconds: float, codec: str = "hevc") -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     tmp = output.with_name(output.stem + ".tmp.mp4")
     tmp.unlink(missing_ok=True)
-    cmd = [ffmpeg, "-hide_banner", "-nostats", "-loglevel", "error", "-y", "-f", "hevc", "-framerate", str(fps),
-           "-i", "pipe:0", "-c", "copy", "-tag:v", "hvc1", "-movflags", "+faststart", str(tmp)]
-    prefix_row = _parameter_sets_row(table, start)
+    tag = ["-tag:v", "hvc1"] if codec == "hevc" else []
+    cmd = [ffmpeg, "-hide_banner", "-nostats", "-loglevel", "error", "-y", "-f", codec, "-framerate", str(fps),
+           "-i", "pipe:0", "-c", "copy", *tag, "-movflags", "+faststart", str(tmp)]
+    prefix_row = _parameter_sets_row(table, start) if codec == "hevc" else None
     try:
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     except OSError as exc:
@@ -68,9 +75,9 @@ def remux_streamed(ffmpeg: str, open_segment: SegmentOpener, camera_topics: Sequ
         first = prefix_row if prefix_row is not None else start
         if prefix_row is not None and prefix_row + 1 < start:
             # stream the prefix packet alone, then the piece
-            stream_packets(open_segment, camera_topics, {cam: (table, prefix_row, prefix_row + 1)}, sink)
+            stream({cam: (table, prefix_row, prefix_row + 1)}, sink)
             first = start
-        stream_packets(open_segment, camera_topics, {cam: (table, first, stop)}, sink)
+        stream({cam: (table, first, stop)}, sink)
     except BaseException:
         proc.kill()
         feeder.close()
@@ -116,23 +123,27 @@ def verify_clip(ffprobe: str, path: Path, expected_frames: int, timeout_seconds:
             "duration_s": float((data.get("format") or {}).get("duration", 0.0))}
 
 
-def write_clip(*, clip_dir: Path, clip_id: str, ffmpeg: str, ffprobe: str, open_segment: SegmentOpener,
-               camera_topics: Sequence[str], tables: Mapping[str, np.ndarray], left_cam: str, right_cam: str,
+def write_clip(*, clip_dir: Path, clip_id: str, ffmpeg: str, ffprobe: str, stream: PacketStreamer,
+               tables: Mapping[str, np.ndarray], left_cam: str, right_cam: str,
                start: int, stop: int, fps: int, imu_t: np.ndarray, imu: np.ndarray, first_frame_ns: int,
                metadata: Mapping[str, Any], timeout_seconds: float,
-               finalize: Callable[[Path], None] | None = None) -> dict[str, Any]:
-    """``finalize(path)`` is called for each verified MP4 (e.g. upload it and delete the local copy)."""
+               finalize: Callable[[Path], None] | None = None, layout: str = "pair", codec: str = "hevc",
+               crops: Mapping[str, Sequence[int]] | None = None) -> dict[str, Any]:
+    """``finalize(path)`` is called for each verified MP4 (e.g. upload it and delete the local copy).
+    ``layout`` 'sbs': one stereo_sbs.mp4 from cam0's packets (both tables share them); ``crops`` gives
+    each camera's x range inside that picture."""
     if clip_dir.exists():
         shutil.rmtree(clip_dir)
     clip_dir.mkdir(parents=True)
     n = stop - start
     verification = {}
-    for eye, cam in (("left", left_cam), ("right", right_cam)):
+    outputs = [("stereo_sbs", "cam0")] if layout == "sbs" else [("left", left_cam), ("right", right_cam)]
+    for eye, cam in outputs:
         table = tables[cam]
         if not table["key"][start]:
             raise SegmentationError(f"{clip_id}: frame {start} is not a keyframe in {cam}")
         out = clip_dir / f"{eye}.mp4"
-        remux_streamed(ffmpeg, open_segment, camera_topics, cam, table, start, stop, fps, out, timeout_seconds)
+        remux_streamed(ffmpeg, stream, cam, table, start, stop, fps, out, timeout_seconds, codec=codec)
         verification[eye] = verify_clip(ffprobe, out, n, timeout_seconds)
         if finalize is not None:
             finalize(out)
@@ -164,8 +175,13 @@ def write_clip(*, clip_dir: Path, clip_id: str, ffmpeg: str, ffprobe: str, open_
         "duration_s": round((end_ns - t0) / 1e9, 6),
         "imu_samples": int(hi - lo),
         "eyes": {"left": left_cam, "right": right_cam},
-        "files": {"left": "left.mp4", "right": "right.mp4", "frame_times": "frame_times.csv", "imu": "imu.csv"},
+        "files": ({"stereo_sbs": "stereo_sbs.mp4"} if layout == "sbs" else {"left": "left.mp4", "right": "right.mp4"})
+        | {"frame_times": "frame_times.csv", "imu": "imu.csv"},
+        "layout": "side_by_side" if layout == "sbs" else "two_streams",
         "verification": verification,
+        **({"eye_crop_x": {"left": list(crops[left_cam]), "right": list(crops[right_cam]),
+                           "note": "x range [start, end) of each eye inside stereo_sbs.mp4"}}
+           if layout == "sbs" and crops else {}),
         **metadata,
     }
     write_json_atomic(clip_dir / "clip.json", info)

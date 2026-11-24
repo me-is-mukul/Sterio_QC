@@ -5,7 +5,14 @@ import pytest
 from video_pipeline.core.config import find_project_root
 from video_pipeline.core.ego_config import load_ego_configuration, processed_bucket
 from video_pipeline.core.errors import ConfigError, PipelineError
-from video_pipeline.ego_cli import discover_sessions, folder_prefix, format_session_list, select_range, source_root
+from video_pipeline.ego_cli import (
+    discover_sessions,
+    folder_prefix,
+    format_session_list,
+    select_range,
+    session_root,
+    source_root,
+)
 from video_pipeline.ingestion.gcs import ObjectInfo, SessionRef
 
 PATTERN = r"^ego_(\d+)\.mcap$"
@@ -23,9 +30,18 @@ OBJECTS = [
     "raw/d2/devB/session_00001-2/ego_0000.mcap", "raw/d2/devB/session_00001-2/session.json",
     "raw/d1/devA/session_00002-9/ego_0000.mcap", "raw/d1/devA/session_00002-9/ego_0001.mcap",
     "raw/d1/devA/session_00001-5/ego_0000.mcap",
-    "raw/d1/devA/session_00003-1/video.h265",             # another recording format: not listed
-    "raw/d1/devA/session_00004-1/sub/ego_0000.mcap",       # nested: not a segment of the session
-    "raw/d1/other.txt",
+    "raw/d1/devA/session_00003-1/video.h265", "raw/d1/devA/session_00003-1/frames.idx",       # hydra
+    "raw/d1/devA/session_00004-1/sub/ego_0000.mcap",       # a recording in a sub-folder: its own session
+    "raw/d1/other.txt",                                     # not a recording
+    "raw/d3/R1/20260518_154730_session1/robocap_segment1_video_left_front.mp4",
+    "raw/d3/R1/20260518_154730_session1/robocap_segment1_video_right_front.mp4",
+    "raw/d3/R1/20260518_154730_session1/robocap_segment2_video_left_front.mp4",
+    "raw/d3/R1/20260518_154730_session1/robocap_segment1_imu_left.db",
+    "raw/d3/R2/outer/20261106_101010_session3/robocap_segment1_video_left_front.mp4",   # nested robocap
+    "raw/d3/R3/ego_20261110_1/video_live_0000.mp4", "raw/d3/R3/ego_20261110_1/frame_map.csv",
+    "raw/d3/R3/ego_20261110_1/calibration.json",
+    "raw/d3/R4/ego_20261106_2/capture.egoc", "raw/d3/R4/ego_20261106_2/calibration.json",
+    "raw/d3/R5/x/.fseventsd/fseventsd-uuid",                # macOS index folder: not a recording
 ]
 
 
@@ -43,13 +59,29 @@ def test_folder_prefix_and_source_root():
 
 def test_discover_sessions_numbering_and_formats():
     found, skipped = discover_sessions(FakeStorage(OBJECTS), "b", "raw/", PATTERN)
-    assert [s["url"] for s in found] == ["gs://b/raw/d1/devA/session_00001-5/", "gs://b/raw/d1/devA/session_00002-9/",
-                                         "gs://b/raw/d2/devB/session_00001-2/"]
-    assert [s["segments"] for s in found] == [1, 2, 1] and skipped == 2
+    assert [(s["url"][len("gs://b/raw/"):], s["format"], s["segments"]) for s in found] == [
+        ("d1/devA/session_00001-5/", "mcap", 1),
+        ("d1/devA/session_00002-9/", "mcap", 2),
+        ("d1/devA/session_00003-1/", "hydra", 1),
+        ("d1/devA/session_00004-1/sub/", "mcap", 1),
+        ("d2/devB/session_00001-2/", "mcap", 1),
+        ("d3/R1/20260518_154730_session1/", "robocap", 2),
+        ("d3/R2/outer/20261106_101010_session3/", "robocap", 1),
+        ("d3/R3/ego_20261110_1/", "egocam_live", 1),
+        ("d3/R4/ego_20261106_2/", "egocam_egoc", 1),
+    ]
+    assert skipped == 2                                     # raw/d1/ (other.txt) and the .fseventsd folder
+    assert found[5]["files"] == 4 and found[5]["bytes"] == 400
     one, _ = discover_sessions(FakeStorage(OBJECTS), "b", "raw/d1/devA/session_00002-9/", PATTERN)
     assert [s["url"] for s in one] == ["gs://b/raw/d1/devA/session_00002-9/"]
     text = format_session_list(found, skipped, 2, 3)
     assert ">   2" in text and ">   3" in text and "    1" in text and "selected by --start 2 --end 3: 2 sessions" in text
+    assert "robocap" in text and "mcap: 4" in text and "2 folder(s) without a recording" in text
+    # a recording folder given as the source: sessions are named below its parent
+    robo = "raw/d3/R1/20260518_154730_session1/"
+    one, _ = discover_sessions(FakeStorage(OBJECTS), "b", robo, PATTERN)
+    assert session_root("b", robo, one) == "raw/d3/R1/"
+    assert session_root("b", "raw/d3/", found) == "raw/d3/"
 
 
 def test_select_range():

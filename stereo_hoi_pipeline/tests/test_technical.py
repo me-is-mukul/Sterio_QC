@@ -6,12 +6,14 @@ from video_pipeline.ingestion.mcap_reader import FRAME_DTYPE
 from video_pipeline.qc.technical import (
     build_decode_command,
     calibration_frame_indices,
+    decode_errors,
     DecodeSettings,
     evaluate_technical,
+    EyeOutput,
     frame_timing,
     merge_intervals,
     pair_eyes,
-    parse_detections,
+    parse_detection_file,
 )
 from pathlib import Path
 
@@ -70,20 +72,32 @@ def test_frame_timing_detects_gap_and_rate():
     assert frame_timing(table(1), 30)["duration_s"] == round(1 / 30, 3)
 
 
-def test_parse_detections_open_freeze_and_errors():
-    stderr = "\n".join([
-        "[blackdetect @ 0x1] [info] black_start:1.5 black_end:7 black_duration:5.5",
-        "[freezedetect @ 0x2] [info] lavfi.freezedetect.freeze_start: 10",
-        "[freezedetect @ 0x2] [info] lavfi.freezedetect.freeze_duration: 6",
-        "[freezedetect @ 0x2] [info] lavfi.freezedetect.freeze_end: 16",
-        "[freezedetect @ 0x2] [info] lavfi.freezedetect.freeze_start: 90",
-        "[hevc @ 0x3] [error] Could not find ref with POC 3",
-        "[swscaler @ 0x4] [warning] deprecated pixel format used",
-    ])
-    d = parse_detections(stderr, 100.0)
+def test_parse_detection_file_open_intervals_and_minimum(tmp_path):
+    path = tmp_path / "detect_cam0.txt"
+    path.write_text("\n".join([
+        "frame:45   pts:45   pts_time:1.5", "lavfi.black_start=1.5",
+        "frame:210  pts:210  pts_time:7", "lavfi.black_end=7",
+        "frame:300  pts:300  pts_time:10", "lavfi.black_start=10",          # 1 s only: too short
+        "frame:330  pts:330  pts_time:11", "lavfi.black_end=11",
+        "frame:450  pts:450  pts_time:15", "lavfi.freezedetect.freeze_start=10",
+        "lavfi.freezedetect.freeze_duration=6", "lavfi.freezedetect.freeze_end=16",
+        "frame:2850 pts:2850 pts_time:95", "lavfi.freezedetect.freeze_start=90",
+        "frame:2940 pts:2940 pts_time:98", "lavfi.black_start=98",           # open at the end, 2 s
+    ]))
+    d = parse_detection_file(path, 100.0, black_min_seconds=5, freeze_min_seconds=5)
     assert d["black"] == [(1.5, 7.0)]
     assert d["frozen"] == [(10.0, 16.0), (90.0, 100.0)]
-    assert len(d["decode_errors"]) == 1
+    assert parse_detection_file(tmp_path / "missing.txt", 100.0, 5, 5) == {"black": [], "frozen": []}
+
+
+def test_decode_errors_and_harmless_messages():
+    stderr = "\n".join([
+        "[hevc @ 0x3] [error] Could not find ref with POC 3",
+        "[mjpeg @ 0x5] [error] unable to decode APP fields: Invalid data found when processing input",
+        "[swscaler @ 0x4] [warning] deprecated pixel format used",
+    ])
+    assert len(decode_errors(stderr)) == 2
+    assert decode_errors(stderr, ("unable to decode APP fields",)) == ["[hevc @ 0x3] [error] Could not find ref with POC 3"]
 
 
 def test_merge_intervals():
@@ -101,11 +115,21 @@ def test_decode_command_shape():
     s = DecodeSettings(fps=30, sample_step=60, sample_max_width=1280, jpeg_quality=85, black_min_seconds=5,
                        black_pixel_threshold=0.1, black_picture_threshold=0.98, freeze_noise_db=-60,
                        freeze_min_seconds=5, timeout_seconds=10)
-    cmd = build_decode_command("ffmpeg", s, sample_dir=Path("s"), calib_dir=Path("c"), calib_indices=[0, 60],
+    cmd = build_decode_command("ffmpeg", s, eyes=[EyeOutput("cam0", None, Path("s"), Path("c"))], calib_indices=[0, 60],
                                progress_path=Path("p"))
     graph = cmd[cmd.index("-filter_complex") + 1]
     assert "split=3" in graph and "not(mod(n,60))" in graph and "eq(n,0)+eq(n,60)" in graph
-    assert cmd[cmd.index("-framerate") + 1] == "30" and "pipe:0" in cmd
+    assert "metadata=mode=print:file=detect_cam0.txt" in graph and "crop" not in graph
+    assert cmd[cmd.index("-framerate") + 1] == "30" and "pipe:0" in cmd and cmd[cmd.index("-f") + 1] == "hevc"
+    # side by side: one input cut into both eyes, MJPEG input
+    sbs = build_decode_command("ffmpeg", s, eyes=[EyeOutput("cam0", [160, 2080], Path("s0"), Path("c0")),
+                                                  EyeOutput("cam1", [2080, 4000], Path("s1"), Path("c1"))],
+                               calib_indices=[], progress_path=Path("p"), codec="mjpeg")
+    graph = sbs[sbs.index("-filter_complex") + 1]
+    assert graph.startswith("[0:v]split=2[in0][in1]")
+    assert "crop=w=1920:h=ih:x=160:y=0" in graph and "crop=w=1920:h=ih:x=2080:y=0" in graph
+    assert "file=detect_cam0.txt" in graph and "file=detect_cam1.txt" in graph and "cout" not in graph
+    assert sbs[sbs.index("-f") + 1] == "mjpeg" and sbs.count("pipe:0") == 1
 
 
 def _cfg():
@@ -131,3 +155,32 @@ def test_imu_starting_late_fails():
                            imu_nominal_hz=467.0, decode=None, cfg=_cfg(), pairing=pairing, paired_cam0=cam0)
     assert "imu_covers_video" in r["failed_checks"]
     assert "length" not in r["failed_checks"] and "eyes_paired" not in r["failed_checks"]
+
+
+def test_frame_timing_on_host_receive_times():
+    # EGO-CAM: arrival times jitter (one 108 ms wait, then a burst) but no frame was lost
+    rng = np.random.default_rng(1)
+    n = 900
+    t = (10 * NS + np.arange(n) * DT + rng.integers(-8_000_000, 8_000_000, n)).astype(np.int64)
+    t[100] = t[99] + 108_000_000
+    t = np.maximum.accumulate(t + np.arange(n))                         # still increasing
+    tab = np.zeros(n, dtype=FRAME_DTYPE)
+    tab["t_ns"] = t
+    seq = np.arange(1, n + 1)
+    host = frame_timing(tab, 30, seq)
+    assert abs(host["fps"] - 30) < 0.5 and host["max_gap_s"] == round(1 / 30, 4) and host["dropped_frames_est"] == 0
+    assert host["host_max_interval_s"] >= 0.1                           # visible, but not a gap
+    assert frame_timing(tab, 30)["max_gap_s"] >= 0.1                    # the device-clock rule would fail it
+    seq[500:] += 3                                                       # three frames lost
+    lost = frame_timing(tab, 30, seq)
+    assert lost["dropped_frames_est"] == 3 and lost["max_gap_s"] == round(4 / 30, 4)
+
+
+def test_frame_timing_mean_rate_without_counter():
+    # capture.egoc: receive times only; a camera that delivers 28 of every 30 frames shows a low mean rate
+    t = (10 * NS + np.cumsum(np.where(np.arange(600) % 15 == 14, 2 * DT, DT))).astype(np.int64)
+    tab = np.zeros(len(t), dtype=FRAME_DTYPE)
+    tab["t_ns"] = t
+    r = frame_timing(tab, 30, mean_rate=True)
+    assert 27.5 < r["fps"] < 28.5 and r["dropped_frames_est"] == 40 and r["max_gap_s"] == round(2 * DT / NS, 4)
+    assert frame_timing(tab, 30)["fps"] == round(NS / DT, 4)            # the median rule would not see it

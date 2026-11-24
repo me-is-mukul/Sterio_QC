@@ -41,11 +41,13 @@ Results are written to `stereo_hoi_pipeline/outputs/<video name>/`. Useful optio
 `--sample-fps <frames per second>`, `--verify-with vlm` and `--resume`. See
 [stereo_hoi_pipeline/README.md](stereo_hoi_pipeline/README.md).
 
-### Egocentric QA on MCAP recordings in Cloud Storage
+### Egocentric QA on recordings in Cloud Storage
 
 The QA pass/fail sheet (technical checks, stereo calibration, time cropping; the content screen is
-a switch, off for now) for the MCAP recordings in `gs://op-datoric/raw/`, with results in
-`gs://op-datoric/processed/`. No AI service needed: MediaPipe finds hands, a motion check finds idle time.
+a switch, off for now) for the recordings in `gs://op-datoric/raw/`, with results in
+`gs://op-datoric/processed/`. Every format in the bucket is read (MCAP, robocap, Hydra, EGO-CAM live,
+EGO-CAM `capture.egoc`); the format of each session is detected automatically. No AI service
+needed: MediaPipe finds hands, a motion check finds idle time.
 
 ```bash
 cd stereo_hoi_pipeline
