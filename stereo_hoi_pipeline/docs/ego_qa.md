@@ -113,7 +113,13 @@ gs://op-datoric/processed/_batches/<batch id>/  sessions.txt  summary.csv
 **Default: no AI service at all.** Everything runs on the VM:
 
 * `hands` (`provider: mediapipe`): MediaPipe Hand Landmarker (`models/hand_landmarker.task`, in
-  the repo) counts the wearer's hands on each sampled frame. "No hands" = it finds none.
+  the repo) counts the wearer's hands on each sampled frame pair, in **both eyes**
+  (`mediapipe.both_eyes`), with confidences 0.3. "No hands" = it finds none of the wearer's hands
+  in either eye. Known limit, measured on a night recording: MediaPipe misses many hands in dark
+  scenes, at the fisheye edge and under motion blur. Both eyes + 0.3 raised the frames with a
+  found hand from 22 % to 42 % (kept footage 96 s → 159 s of 250 s) with no false hands on a static
+  recording, but some real work in dark footage is still cut as "no hands". Raise
+  `cropping.no_hands_cut_seconds` to cut less.
 * `idle` (`provider: motion`): a sample is idle when nothing moves. The picture barely changes
   compared with the previous and the next sample (share of changed pixels ≤
   `motion.max_changed_fraction`), **and** the head is still (median gyroscope speed within ±1 s ≤

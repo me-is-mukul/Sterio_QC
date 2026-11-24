@@ -41,6 +41,7 @@ class Sample:
     t_ns: int           # capture time (device clock) of the left-eye frame
     t_s: float          # seconds since the first frame
     image: Path         # left-eye JPEG
+    other_image: Path | None = None   # right-eye JPEG of the same frame pair (used by MediaPipe)
 
 
 def validate_answer(text: str, schema: Mapping[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
@@ -129,7 +130,12 @@ class VlmLabeller(FrameLabeller):
 
 
 class MediaPipeHandsLabeller(FrameLabeller):
-    """Counts the wearer's hands with MediaPipe (no activity, no content)."""
+    """Counts the wearer's hands with MediaPipe (no activity, no content).
+
+    With ``mediapipe.both_eyes`` the right-eye image of the same frame pair is checked as well and
+    the eye that sees more of the wearer's hands counts: MediaPipe often misses a hand in one eye
+    (dark scenes, fisheye edge) that it finds in the other, and a missed hand can cut real work.
+    """
 
     def __init__(self, key: str, concurrency: int, model_path: Path, settings: Mapping[str, Any]) -> None:
         super().__init__(key, ("hands",), 1)       # the MediaPipe landmarker is not thread-safe
@@ -147,14 +153,24 @@ class MediaPipeHandsLabeller(FrameLabeller):
 
     def label(self, sample: Sample) -> dict[str, Any]:
         started = time.perf_counter()
+        images = [("left", sample.image)]
+        if self._settings.get("both_eyes"):
+            if sample.other_image is None:
+                return {"status": "failed", "error": "mediapipe.both_eyes is on but the sample has no right-eye image"}
+            images.append(("right", sample.other_image))
+        wearer: dict[str, int] = {}
+        other = 0
         try:
             with self._lock:
-                hands = self._detector.view_hands(sample.image)
+                for eye, path in images:
+                    hands = self._detector.view_hands(path)
+                    wearer[eye] = sum(1 for h in hands if h["role"] == "wearer")
+                    other = max(other, len(hands) - wearer[eye])
         except InferenceError as exc:
             return {"status": "failed", "error": str(exc)[:500]}
-        wearer = [h for h in hands if h["role"] == "wearer"]
-        count = {0: "none", 1: "one"}.get(len(wearer), "both")
-        return {"status": STATUS_OK, "labels": {"hands": count, "other_hands": len(hands) - len(wearer)},
+        count = {0: "none", 1: "one"}.get(max(wearer.values()), "both")
+        return {"status": STATUS_OK, "labels": {"hands": count, "hands_left_eye": wearer["left"],
+                                                "hands_right_eye": wearer.get("right"), "other_hands": other},
                 "latency_s": round(time.perf_counter() - started, 3)}
 
     def close(self) -> None:

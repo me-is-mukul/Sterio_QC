@@ -121,6 +121,33 @@ def test_cache_is_reused_only_for_the_same_settings(tmp_path):
     assert all(r["labels"]["activity"] == "moving" for r in out.values())
 
 
+def test_mediapipe_both_eyes(tmp_path):
+    from video_pipeline.core.config import find_project_root
+    from video_pipeline.core.ego_config import load_ego_configuration
+    from video_pipeline.inference.ego_labeller import MediaPipeHandsLabeller
+
+    root = find_project_root()
+    settings = load_ego_configuration(root).get("mediapipe")
+    assert settings["both_eyes"] is True
+    samples = _write_samples(tmp_path, moving=set())
+    labeller = MediaPipeHandsLabeller("hands", 1, root / settings["model_path"], settings)
+    try:
+        missing = labeller.label(samples[0])                      # no right-eye image given
+        assert missing["status"] == "failed" and "right-eye" in missing["error"]
+        both = Sample(0, 0, 0, 0.0, samples[0].image, samples[1].image)
+        out = labeller.label(both)
+        assert out["status"] == "ok" and out["labels"]["hands"] == "none"
+        assert out["labels"]["hands_left_eye"] == 0 and out["labels"]["hands_right_eye"] == 0
+        one_eye = MediaPipeHandsLabeller("hands", 1, root / settings["model_path"], {**settings, "both_eyes": False})
+        try:
+            assert one_eye.label(samples[0])["labels"]["hands_right_eye"] is None
+            assert one_eye.fingerprint() != labeller.fingerprint()
+        finally:
+            one_eye.close()
+    finally:
+        labeller.close()
+
+
 def test_label_before_begin_session_fails(tmp_path):
     samples = _write_samples(tmp_path, moving=set())
     with pytest.raises(Exception, match="failed or invalid"):

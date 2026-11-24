@@ -144,11 +144,16 @@ inference:
   recording_prompt: ego-qa-recording-v1
   clip_prompt: ego-qa-clip-v1
 
+# MediaPipe hand detection ("no hands"). Measured on the recordings (night scene, 125 frames): it
+# misses many of the wearer's hands in dark / fisheye-edge views. Checking both eyes and lowering the
+# confidences from 0.5 to 0.3 raised the frames with a found hand from 22 % to 42 %, with no false
+# hands on a static recording. A missed hand can cut real work, so keep these.
 mediapipe:
   model_path: models/hand_landmarker.task
+  both_eyes: true                # a hand found in either eye of the frame pair counts
   num_hands: 4
-  min_hand_detection_confidence: 0.5
-  min_hand_presence_confidence: 0.5
+  min_hand_detection_confidence: 0.3
+  min_hand_presence_confidence: 0.3
   min_hand_size: 0.08
   max_pointing_down: 0.5
   large_hand_size: 0.175

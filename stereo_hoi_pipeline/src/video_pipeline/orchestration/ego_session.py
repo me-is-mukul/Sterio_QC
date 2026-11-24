@@ -556,13 +556,14 @@ def _eyes(state: State) -> tuple[str, str]:
 
 
 def _samples(state: State) -> list[Sample]:
-    left, _ = _eyes(state)
+    left, right = _eyes(state)
     tables, _, _ = _load_tables(state.paths)
     step = state.data["technical"]["sample_step_frames"]
     t = tables[left]["t_ns"]
     t0 = int(t[0])
     return [Sample(k, k * step, int(t[k * step]), (int(t[k * step]) - t0) / 1e9,
-                   state.paths.samples / left / f"{k:06d}.jpg") for k in range(state.data["technical"]["samples"])]
+                   state.paths.samples / left / f"{k:06d}.jpg", state.paths.samples / right / f"{k:06d}.jpg")
+            for k in range(state.data["technical"]["samples"])]
 
 
 def _frame_stats(samples: list[Sample], imu_t: np.ndarray, imu: np.ndarray) -> dict[int, dict[str, float | None]]:
@@ -590,7 +591,7 @@ def _labellers(services: Services) -> dict[str, FrameLabeller]:
 def _step_labelling(state: State, services: Services) -> dict[str, Any]:
     cfg = state.config
     samples = _samples(state)
-    missing = [s.image.name for s in samples if not s.image.is_file()]
+    missing = [str(p) for s in samples for p in (s.image, s.other_image) if p is not None and not p.is_file()]
     if missing:
         raise PipelineError(f"{len(missing)} sampled frames are missing (e.g. {missing[:3]}); re-run with --force.")
     cache_dir = state.paths.out / "labels"
@@ -847,7 +848,8 @@ def _write_labels_csv(state: State, services: Services) -> None:
     specs = state.config.get("models")
     models = list(specs)
     # Extra per-model columns of the local (non-AI) labellers.
-    extra = {"mediapipe": ["other_hands"], "motion": ["changed_prev", "changed_next", "gyro_median_rad_s"]}
+    extra = {"mediapipe": ["hands_left_eye", "hands_right_eye", "other_hands"],
+             "motion": ["changed_prev", "changed_next", "gyro_median_rad_s"]}
     header = ["sample", "frame", "t_s", "t_left_ns"]
     for m in models:
         header += [f"{m}_status", f"{m}_hands", f"{m}_activity"] + [f"{m}_{f}" for f in extra.get(specs[m]["provider"], [])]
