@@ -75,9 +75,23 @@ def _user_config(tmp_path, data) -> Path:
     return path
 
 
+def test_default_config_needs_no_ai_service():
+    cfg = load_ego_configuration(find_project_root())
+    assert {spec["provider"] for spec in cfg.get("models").values()} == {"mediapipe", "motion"}
+    assert cfg.get("content.enabled") is False and cfg.get("cropping.min_models_per_decision") == 1
+
+
+def test_vlm_config_file_is_valid():
+    root = find_project_root()
+    cfg = load_ego_configuration(root, root / "configs" / "ego_qa_with_vlm.yaml")
+    assert set(cfg.get("models")) == {"model_a", "model_b"}
+    assert cfg.get("content.enabled") is True and cfg.get("cropping.min_models_per_decision") == 2
+
+
 def test_user_config_replaces_models_and_checks_minimum(tmp_path):
     only_one = {"models": {"g": {"provider": "gemini", "model": "m", "location": "l",
-                                 "provides": ["hands", "activity", "content"]}}}
+                                 "provides": ["hands", "activity", "content"]}},
+                "content": {"enabled": True}, "cropping": {"min_models_per_decision": 2}}
     with pytest.raises(ConfigError, match="min_models_per_decision"):
         load_ego_configuration(find_project_root(), _user_config(tmp_path, only_one))
     ok = {**only_one, "cropping": {"min_models_per_decision": 1}}
@@ -89,9 +103,24 @@ def test_user_config_rejects_unknown_keys_and_two_content_models(tmp_path):
     with pytest.raises(ConfigError):
         load_ego_configuration(find_project_root(), _user_config(tmp_path, {"cropping": {"idle_seconds": 5}}))
     two = {"models": {k: {"provider": "gemini", "model": "m", "location": "l", "provides": ["hands", "activity", "content"]}
-                      for k in ("a", "b")}}
+                      for k in ("a", "b")}, "content": {"enabled": True}}
     with pytest.raises(ConfigError, match="exactly one model"):
         load_ego_configuration(find_project_root(), _user_config(tmp_path, two))
+
+
+def test_content_model_needs_content_enabled_and_local_roles(tmp_path):
+    one = {"models": {"g": {"provider": "gemini", "model": "m", "location": "l",
+                            "provides": ["hands", "activity", "content"]}}}
+    with pytest.raises(ConfigError, match="content.enabled is false"):
+        load_ego_configuration(find_project_root(), _user_config(tmp_path, one))
+    no_content = {"models": {"h": {"provider": "mediapipe", "provides": ["hands"]},
+                             "i": {"provider": "motion", "provides": ["activity"]}}, "content": {"enabled": True}}
+    with pytest.raises(ConfigError, match="exactly one model"):
+        load_ego_configuration(find_project_root(), _user_config(tmp_path, no_content))
+    wrong = {"models": {"h": {"provider": "mediapipe", "provides": ["hands"]},
+                        "i": {"provider": "motion", "provides": ["activity", "hands"]}}}
+    with pytest.raises(ConfigError, match="motion provider can only provide 'activity'"):
+        load_ego_configuration(find_project_root(), _user_config(tmp_path, wrong))
 
 
 CONTENT_CFG = {"minor_min_frames": 2, "third_person_max_share": 0.5, "lens_max_share": 0.5, "private_min_frames": 2}

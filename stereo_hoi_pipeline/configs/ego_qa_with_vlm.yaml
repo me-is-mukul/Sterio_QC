@@ -1,0 +1,25 @@
+# OPTIONAL: the QA sheet's full setup with two vision-language models (not used by default).
+#   python scripts/run_gcs_batch.py --sessions-file sessions_10.txt --config configs/ego_qa_with_vlm.yaml
+# Needs: Gemini on Vertex AI (the VM's service account needs roles/aiplatform.user) and the
+# endpoint of model_a in .env (INFERENCE_PROVIDER + OLLAMA_* or VLLM_*).
+# `models` replaces the default models as a whole.
+
+models:
+  model_a:                       # "fine-tuned vision model": the endpoint configured in .env
+    provider: env
+    model: null                  # null = from .env
+    base_url: null               # null = from .env
+    concurrency: 1
+    provides: [hands, activity]
+  model_b:
+    provider: gemini
+    model: gemini-3.5-flash
+    location: asia-south1        # same region as my-vm
+    concurrency: 8
+    provides: [hands, activity, content]
+
+content:
+  enabled: true                  # section 3 (minors, private moments, ...) judged by model_b
+
+cropping:
+  min_models_per_decision: 2     # both models must agree before anything is cut

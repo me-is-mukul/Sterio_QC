@@ -12,8 +12,13 @@ gcp:
 
 source:
   bucket: op-datoric
+  # Source and destination. Both can also be given on the command line (they then win):
+  #   --source gs://<bucket>/<folder>/   sets bucket + raw_root
+  #   --dest   gs://<bucket>/<folder>/   sets processed_bucket + processed_root
+  # A session's result goes to <destination>/<path of the session below the source folder>/.
   raw_root: raw/                 # sessions are read from here (never written)
   processed_root: processed/     # results: processed/<path of the session below raw/>
+  processed_bucket: null         # null = the same bucket as `bucket`
   session_json: session.json
   segment_pattern: '^ego_(\d+)\.mcap$'
   # Segments are STREAMED from the bucket (ranged reads of the exact listed object version), never
@@ -92,7 +97,7 @@ calibration:
   # camera on (on the recordings checked: cam1 = left). Or force cam0 / cam1.
   labelled_left: calibration
 
-# Labelling of the sampled frames (sections 3 and 4).
+# Labelling of the sampled frames (section 4).
 labelling:
   interval_seconds: 2
   eye: left
@@ -103,24 +108,30 @@ labelling:
   # (instead of silently keeping or passing everything).
   max_failure_ratio: 0.02
 
-# Every model used. `provides`: what its answers are used for.
+# What labels every sampled frame. `provides`: what its answers are used for.
 #   hands, activity  section 4 (all models that provide one must agree before anything is cut)
-#   content          section 3 (exactly one model; it also judges the frame strips)
-# provider: gemini | ollama | openai_compatible | env (INFERENCE_PROVIDER + its .env variables)
-#           | mediapipe (hands only)
+#   content          section 3 (exactly one model, only when content.enabled is true)
+# provider: mediapipe (hands, runs locally) | motion (activity, runs locally, no AI model)
+#           | gemini | ollama | openai_compatible | env (INFERENCE_PROVIDER + its .env variables)
+# Default: NO AI service at all. To use vision-language models instead, run with
+#   --config configs/ego_qa_with_vlm.yaml
 models:
-  model_a:                       # D1: "fine-tuned vision model". Default: the endpoint configured in .env
-    provider: env
-    model: null                  # null = from .env
-    base_url: null               # null = from .env
-    concurrency: 1
-    provides: [hands, activity]
-  model_b:
-    provider: gemini
-    model: gemini-3.5-flash
-    location: asia-south1        # same region as my-vm
-    concurrency: 8
-    provides: [hands, activity, content]
+  hands:
+    provider: mediapipe          # "no hands": MediaPipe finds none of the wearer's hands
+    provides: [hands]
+  idle:
+    provider: motion             # "idle": nothing moves (see the motion section below)
+    concurrency: 4
+    provides: [activity]
+  # Content screen (section 3: minors, private moments, ...). NOT CONFIGURED YET. To turn it on
+  # later: uncomment this block, fill in the model, and set content.enabled: true below (or pass
+  # --content-screen on). See docs/ego_qa.md, "Turning on the content screen".
+  # content:
+  #   provider: gemini           # or ollama / openai_compatible / env
+  #   model: gemini-3.5-flash
+  #   location: asia-south1      # gemini only
+  #   concurrency: 8
+  #   provides: [content]
 
 inference:
   timeout_seconds: 120
@@ -146,8 +157,22 @@ mediapipe:
   pinch_ratio: 0.40
   hands_without_grasp: UNCERTAIN
 
-# Section 3: content screen.
+# Model-free idle detection (provider: motion). A sample is idle when BOTH hold:
+#   * the picture barely changes from the previous and the next sample (2 s apart): the share of
+#     pixels that changed by more than pixel_threshold grey levels (picture shrunk to image_width
+#     pixels wide and blurred) is at most max_changed_fraction in both comparisons;
+#   * the head is still: median gyroscope speed within +/-1 s is at most max_gyro_rad_s.
+# Moving hands or a moving head = not idle, so footage is only cut when the wearer is inactive.
+motion:
+  image_width: 160
+  pixel_threshold: 20
+  max_changed_fraction: 0.02
+  max_gyro_rad_s: 0.15
+
+# Section 3: content screen. SWITCH: enabled (or --content-screen on|off). Off for now: it needs a
+# vision-language model that is not configured yet (see the commented `content` model above).
 content:
+  enabled: false
   minor_min_frames: 2            # D6: frames showing a minor -> drop the recording
   third_person_max_share: 0.5    # D6: "most of the recording"
   lens_max_share: 0.5            # D6: "most of the recording"
@@ -159,7 +184,7 @@ content:
 cropping:
   idle_cut_seconds: 10           # run of all-idle samples spanning >= this (t_last - t_first) is cut (D3)
   no_hands_cut_seconds: 10       # same for "no wearer hand visible" (D2: all models must agree)
-  min_models_per_decision: 2     # models that must label hands/activity; 1 only with an explicit override
+  min_models_per_decision: 1     # models that must label hands/activity (the QA sheet asks for 2)
   cut_defects: true              # also cut black/frozen stretches found in section 1
   keyframe_snap_max_seconds: 1
   min_piece_seconds: 30

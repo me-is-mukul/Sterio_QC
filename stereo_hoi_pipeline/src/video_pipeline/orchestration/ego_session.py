@@ -45,7 +45,7 @@ from video_pipeline.analysis.content_screen import (
 )
 from video_pipeline.analysis.cropping import decide_samples, defect_frame_ranges, flagged_runs, plan_pieces
 from video_pipeline.core.config import ResolvedConfig
-from video_pipeline.core.ego_config import STEP_CONFIG_KEYS
+from video_pipeline.core.ego_config import STEP_CONFIG_KEYS, processed_bucket
 from video_pipeline.core.errors import InferenceError, IngestionError, PipelineError
 from video_pipeline.core.hashing import sha256_json
 from video_pipeline.core.io import read_json, utc_now_iso, write_json_atomic, write_text_atomic
@@ -181,7 +181,7 @@ def run_session(session: SessionRef, services: Services, *, force: bool, upload:
                 max_segments: int | None = None, argv: tuple[str, ...] = ()) -> dict[str, Any]:
     cfg = services.config
     started = time.perf_counter()
-    bucket = cfg.get("source.bucket")
+    bucket = processed_bucket(cfg)
     existing_report = f"{cfg.get('source.processed_root')}{session.relative}/qa_report.json"
     on_existing = cfg.get("upload.on_existing")
     if upload and not force and on_existing == "skip" and services.storage.exists(bucket, existing_report):
@@ -252,7 +252,7 @@ def _run_locked(session: SessionRef, services: Services, paths: SessionPaths, *,
             manifest.save(paths.manifest)
             with stage_scope("upload"):
                 _upload(state, services, prefix)
-            manifest.set_result("upload", f"gs://{cfg.get('source.bucket')}/{prefix}")
+            manifest.set_result("upload", f"gs://{processed_bucket(cfg)}/{prefix}")
             manifest.finish("completed")
             manifest.save(paths.manifest)
             if cfg.get("work.delete_local_files_after_upload"):
@@ -595,15 +595,16 @@ def _step_labelling(state: State, services: Services) -> dict[str, Any]:
         raise PipelineError(f"{len(missing)} sampled frames are missing (e.g. {missing[:3]}); re-run with --force.")
     cache_dir = state.paths.out / "labels"
     per_model: dict[str, Any] = {}
+    _tables, imu_t, imu = _load_tables(state.paths)
     for key, labeller in _labellers(services).items():
         t0 = time.perf_counter()
+        labeller.begin_session(samples, imu_t, imu)
         results = label_samples(labeller, samples, cache_dir / f"labels_{key}.jsonl",
                                 max_failure_ratio=cfg.get("labelling.max_failure_ratio"))
         ok = sum(1 for r in results.values() if r.get("status") == "ok")
         per_model[key] = {"samples": len(samples), "ok": ok, "failed_or_invalid": len(samples) - ok,
                           "elapsed_s": round(time.perf_counter() - t0, 1), "provides": list(labeller.provides)}
         logger.info("Model '%s': %d/%d samples labelled successfully.", key, ok, len(samples))
-    _tables, imu_t, imu = _load_tables(state.paths)
     stats = _frame_stats(samples, imu_t, imu)
     write_json_atomic(state.paths.out / "labels" / "frame_stats.json", {str(k): v for k, v in stats.items()})
     return {"samples": len(samples), "interval_s": cfg.get("labelling.interval_seconds"), "eye": _eyes(state)[0],
@@ -628,7 +629,13 @@ def _load_labels(state: State, services: Services) -> dict[str, dict[int, dict[s
     return out
 
 
-def _content_model(cfg: ResolvedConfig) -> str:
+CONTENT_DISABLED = "content screen (section 3) disabled: content.enabled is false"
+
+
+def _content_model(cfg: ResolvedConfig) -> str | None:
+    """The content model, or None when the content screen is disabled."""
+    if not cfg.get("content.enabled"):
+        return None
     return next(k for k, spec in cfg.get("models").items() if "content" in spec["provides"])
 
 
@@ -676,10 +683,13 @@ def _ask_strip(state: State, services: Services, prompt_name: str, samples: list
 def _step_content_recording(state: State, services: Services) -> dict[str, Any]:
     cfg = state.config
     content_cfg = cfg.get("content")
+    model = _content_model(cfg)
+    if model is None:
+        logger.info("Content screen skipped (content.enabled: false).")
+        return {"checked": False, "reason": CONTENT_DISABLED, "findings": []}
     samples = _samples(state)
     times = {s.index: round(s.t_s, 3) for s in samples}
     labels = _load_labels(state, services)
-    model = _content_model(cfg)
     flags = recording_frame_flags(labels[model], times, content_cfg)
     duration = state.data["technical"].get("duration_s") or 0.0
     strip = _ask_strip(state, services, cfg.get("inference.recording_prompt"),
@@ -690,7 +700,7 @@ def _step_content_recording(state: State, services: Services) -> dict[str, Any]:
         findings.append(no_work)
     for f in findings:
         logger.warning("Content: %s", f["message"])
-    return {"content_model": model, **flags, "findings": findings, "recording_strip": strip,
+    return {"checked": True, "content_model": model, **flags, "findings": findings, "recording_strip": strip,
             "fail_reasons": [{"section": "content", "check": f["finding"], "message": f["message"]} for f in findings]}
 
 
@@ -747,6 +757,10 @@ def _step_content_clips(state: State, services: Services) -> dict[str, Any]:
     for number, piece in enumerate(p for p in state.data["cropping"]["pieces"] if p["kept"]):
         first = -(-piece["start"] // step) * step
         inside = [by_frame[f] for f in range(first, piece["stop"], step) if f in by_frame]
+        if model is None:                      # content screen disabled: every piece is kept
+            results.append({"start": piece["start"], "stop": piece["stop"], "duration_s": piece["duration_s"],
+                            "samples": len(inside), "checked": False, "strip": None, "findings": [], "kept": True})
+            continue
         strip = None
         if len(inside) >= 2:
             strip = _ask_strip(state, services, cfg.get("inference.clip_prompt"),
@@ -757,7 +771,8 @@ def _step_content_clips(state: State, services: Services) -> dict[str, Any]:
             logger.warning("Piece %d (%.0f-%.0f s): %s", number, times_at(state, piece["start"]),
                            times_at(state, piece["stop"] - 1), f["message"])
         results.append({"start": piece["start"], "stop": piece["stop"], "duration_s": piece["duration_s"],
-                        "samples": len(inside), "strip": strip, "findings": findings, "kept": not findings})
+                        "samples": len(inside), "checked": True, "strip": strip, "findings": findings,
+                        "kept": not findings})
     kept = [r for r in results if r["kept"]]
     return {"pieces": results, "kept_pieces": len(kept), "kept_seconds": round(sum(r["duration_s"] for r in kept), 3),
             "fail_reasons": [] if kept else [{"section": "content", "check": "nothing_left_after_clip_screen",
@@ -785,7 +800,7 @@ def _step_clips(state: State, services: Services) -> dict[str, Any]:
         shutil.rmtree(state.paths.clips)
     finalize: Callable[[Path], None] | None = None
     if state.upload_prefix is not None:
-        bucket = cfg.get("source.bucket")
+        bucket = processed_bucket(cfg)
 
         def upload_and_delete(path: Path) -> None:
             """Upload a verified clip MP4 right away and delete the local copy (one MP4 on disk at a time)."""
@@ -828,11 +843,14 @@ def _write_labels_csv(state: State, services: Services) -> None:
     decisions = {d["index"]: d for d in read_json(decisions_path)} if decisions_path.is_file() else {}
     content_model = _content_model(state.config)
     content_fields = ["phone_use", "minor_visible", "third_person_or_fixed_camera", "lens_covered_or_smudged",
-                      "desk_or_computer_work", "private_moment", "description"]
-    models = list(state.config.get("models"))
+                      "desk_or_computer_work", "private_moment", "description"] if content_model else []
+    specs = state.config.get("models")
+    models = list(specs)
+    # Extra per-model columns of the local (non-AI) labellers.
+    extra = {"mediapipe": ["other_hands"], "motion": ["changed_prev", "changed_next", "gyro_median_rad_s"]}
     header = ["sample", "frame", "t_s", "t_left_ns"]
     for m in models:
-        header += [f"{m}_status", f"{m}_hands", f"{m}_activity"]
+        header += [f"{m}_status", f"{m}_hands", f"{m}_activity"] + [f"{m}_{f}" for f in extra.get(specs[m]["provider"], [])]
     header += [f"{content_model}_{f}" for f in content_fields] + ["idle", "no_hands", "luma_mean", "sharpness",
                                                                   "gyro_std_rad_s"]
     path = state.paths.out / "labels.csv"
@@ -845,9 +863,11 @@ def _write_labels_csv(state: State, services: Services) -> None:
                 rec = labels.get(m, {}).get(s.index, {})
                 lab = rec.get("labels", {}) if rec.get("status") == "ok" else {}
                 row += [rec.get("status", "missing"), lab.get("hands", ""), lab.get("activity", "")]
-            rec = labels.get(content_model, {}).get(s.index, {})
-            lab = rec.get("labels", {}) if rec.get("status") == "ok" else {}
-            row += [lab.get(f, "") for f in content_fields]
+                row += [lab.get(f, "") for f in extra.get(specs[m]["provider"], [])]
+            if content_model:
+                rec = labels.get(content_model, {}).get(s.index, {})
+                lab = rec.get("labels", {}) if rec.get("status") == "ok" else {}
+                row += [lab.get(f, "") for f in content_fields]
             d = decisions.get(s.index)
             row += [d["idle"] if d else "", d["no_hands"] if d else ""]
             st = stats.get(str(s.index), {})
@@ -870,7 +890,7 @@ def _write_report(state: State, services: Services, upload_prefix: str | None, m
         "generated_at": utc_now_iso(),
         "pipeline_version": __version__,
         "config_fingerprint": state.config.fingerprint,
-        "uploaded_to": f"gs://{state.config.get('source.bucket')}/{upload_prefix}" if upload_prefix else None,
+        "uploaded_to": f"gs://{processed_bucket(state.config)}/{upload_prefix}" if upload_prefix else None,
         "steps_run": [s for s in STEPS if s in d],
         "technical": None,
         "calibration": None,
@@ -890,9 +910,11 @@ def _write_report(state: State, services: Services, upload_prefix: str | None, m
                                                                     "median_vertical_px", "p95_vertical_px",
                                                                     "inlier_matches", "pairs_with_matches", "eye_order")}
         write_json_atomic(state.paths.out / "calibration.json", d["calibration"])
-    if "content_recording" in d:
+    if not state.config.get("content.enabled"):
+        report["content"] = {"checked": False, "reason": CONTENT_DISABLED}
+    elif "content_recording" in d:
         report["content"] = {"recording": {k: v for k, v in d["content_recording"].items() if k != "fail_reasons"}}
-    if "content_clips" in d:
+    if "content_clips" in d and state.config.get("content.enabled"):
         report["content"] = report["content"] or {}
         report["content"]["clips"] = d["content_clips"]["pieces"]
     if "cropping" in d:
@@ -912,9 +934,11 @@ def _write_report(state: State, services: Services, upload_prefix: str | None, m
 
 
 def _check_prefix(state: State, prefix: str) -> None:
-    root = state.config.get("source.processed_root")
-    if not prefix.startswith(root) or prefix.startswith(state.config.get("source.raw_root")):
-        raise PipelineError(f"Refusing to write outside {root}: {prefix}")
+    cfg = state.config
+    root = cfg.get("source.processed_root")
+    into_source = processed_bucket(cfg) == cfg.get("source.bucket") and prefix.startswith(cfg.get("source.raw_root"))
+    if not prefix.startswith(root) or into_source:
+        raise PipelineError(f"Refusing to write outside gs://{processed_bucket(cfg)}/{root}: {prefix}")
 
 
 def _prepare_target(state: State, services: Services) -> None:
@@ -923,7 +947,7 @@ def _prepare_target(state: State, services: Services) -> None:
     reads as incomplete until the new result is complete."""
     prefix = state.upload_prefix
     _check_prefix(state, prefix)
-    bucket = state.config.get("source.bucket")
+    bucket = processed_bucket(state.config)
     if services.storage.exists(bucket, prefix + "qa_report.json"):
         logger.info("Replacing the existing result in gs://%s/%s (its qa_report.json is removed first)", bucket, prefix)
         services.storage.delete(bucket, prefix + "qa_report.json")
@@ -938,7 +962,7 @@ def _upload(state: State, services: Services, prefix: str) -> None:
     touched (never runs/ below it, never raw/).
     """
     _check_prefix(state, prefix)
-    bucket = state.config.get("source.bucket")
+    bucket = processed_bucket(state.config)
     out = state.paths.out
     files = sorted(p for p in out.rglob("*") if p.is_file() and not p.name.endswith((".tmp", ".part", ".tmp.mp4")))
     report = out / "qa_report.json"

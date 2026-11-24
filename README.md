@@ -43,13 +43,15 @@ Results are written to `stereo_hoi_pipeline/outputs/<video name>/`. Useful optio
 
 ### Egocentric QA on MCAP recordings in Cloud Storage
 
-The QA pass/fail sheet (technical checks, stereo calibration, content screen, time cropping) for the
-MCAP recordings in `gs://op-datoric/raw/`, with results in `gs://op-datoric/processed/`:
+The QA pass/fail sheet (technical checks, stereo calibration, time cropping; the content screen is
+a switch, off for now) for the MCAP recordings in `gs://op-datoric/raw/`, with results in
+`gs://op-datoric/processed/`. No AI service needed: MediaPipe finds hands, a motion check finds idle time.
 
 ```bash
 cd stereo_hoi_pipeline
-python scripts/run_gcs_batch.py --list-sessions gs://op-datoric/raw/Op_DD/
-python scripts/run_gcs_batch.py --sessions-file sessions_10.txt
+python scripts/run_gcs_batch.py --source gs://op-datoric/raw/Op_DD/31-10-2026/ --list-sessions
+python scripts/run_gcs_batch.py --source gs://op-datoric/raw/Op_DD/31-10-2026/ \
+    --dest gs://op-datoric/processed/Op_DD/31-10-2026/ --start 1 --end 10
 ```
 
 See [stereo_hoi_pipeline/docs/ego_qa.md](stereo_hoi_pipeline/docs/ego_qa.md) and

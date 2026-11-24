@@ -24,7 +24,8 @@ from video_pipeline.core.errors import ConfigError
 from video_pipeline.core.gcp_auth import CREDENTIAL_MODES
 
 EGO_CONFIG_FILE = "ego_qa.yaml"
-PROVIDERS = frozenset({"gemini", "ollama", "openai_compatible", "env", "mediapipe"})
+PROVIDERS = frozenset({"gemini", "ollama", "openai_compatible", "env", "mediapipe", "motion"})
+LOCAL_PROVIDERS = frozenset({"mediapipe", "motion"})     # run on this machine, no AI service
 MODEL_ROLES = frozenset({"hands", "activity", "content"})
 ON_EXISTING = frozenset({"skip", "overwrite", "new_run_folder"})
 
@@ -35,6 +36,7 @@ _SCHEMA: dict[str, tuple[type, ...]] = {
     "source.bucket": (str,),
     "source.raw_root": (str,),
     "source.processed_root": (str,),
+    "source.processed_bucket": (str, type(None)),
     "source.session_json": (str,),
     "source.segment_pattern": (str,),
     "source.read_chunk_mb": _N,
@@ -98,6 +100,11 @@ _SCHEMA: dict[str, tuple[type, ...]] = {
     "inference.recording_prompt": (str,),
     "inference.clip_prompt": (str,),
     "mediapipe": (dict,),
+    "motion.image_width": (int,),
+    "motion.pixel_threshold": _N,
+    "motion.max_changed_fraction": _N,
+    "motion.max_gyro_rad_s": _N,
+    "content.enabled": (bool,),
     "content.minor_min_frames": (int,),
     "content.third_person_max_share": _N,
     "content.lens_max_share": _N,
@@ -120,7 +127,7 @@ STEP_CONFIG_KEYS: dict[str, tuple[str, ...]] = {
     "technical": ("technical", "labelling.interval_seconds", "labelling.image_max_width", "labelling.jpeg_quality",
                   "calibration.pairs"),
     "calibration": ("calibration",),
-    "labelling": ("labelling", "models", "inference.frame_prompt", "inference.temperature", "mediapipe"),
+    "labelling": ("labelling", "models", "inference.frame_prompt", "inference.temperature", "mediapipe", "motion"),
     "content_recording": ("content", "inference.recording_prompt", "inference.temperature"),
     "cropping": ("cropping", "technical.expected_fps"),
     "content_clips": ("content", "inference.clip_prompt", "inference.temperature"),
@@ -158,7 +165,12 @@ def validate_ego_config(data: Mapping[str, Any]) -> None:
     for key in ("source.raw_root", "source.processed_root"):
         value = get(key)
         check(value.endswith("/") and not value.startswith("/"), f"'{key}' must end with '/' and not start with '/'")
-    check(get("source.raw_root") != get("source.processed_root"), "'source.raw_root' and 'source.processed_root' must differ")
+    raw, out = get("source.raw_root"), get("source.processed_root")
+    if processed_bucket(data) == get("source.bucket"):
+        check(not raw.startswith(out) and not out.startswith(raw),
+              f"the destination gs://{get('source.bucket')}/{out} and the source gs://{get('source.bucket')}/{raw} "
+              "must not contain each other")
+    check(processed_bucket(data) != "", "'source.processed_bucket' must not be empty (null = same as source.bucket)")
     check(1 <= get("source.read_chunk_mb") <= 256, "'source.read_chunk_mb' must be 1..256")
     try:
         pattern = re.compile(get("source.segment_pattern"))
@@ -205,6 +217,10 @@ def validate_ego_config(data: Mapping[str, Any]) -> None:
     for key in ("idle_cut_seconds", "no_hands_cut_seconds", "min_piece_seconds", "keyframe_snap_max_seconds"):
         check(get(f"cropping.{key}") > 0, f"'cropping.{key}' must be > 0")
     check(get("cropping.min_models_per_decision") >= 1, "'cropping.min_models_per_decision' must be >= 1")
+    check(16 <= get("motion.image_width") <= 1280, "'motion.image_width' must be 16..1280")
+    check(0 < get("motion.pixel_threshold") < 255, "'motion.pixel_threshold' must be in (0, 255)")
+    check(0 <= get("motion.max_changed_fraction") < 1, "'motion.max_changed_fraction' must be in [0, 1)")
+    check(get("motion.max_gyro_rad_s") > 0, "'motion.max_gyro_rad_s' must be > 0")
 
     models = get("models")
     check(bool(models), "'models' must define at least one model")
@@ -225,22 +241,36 @@ def validate_ego_config(data: Mapping[str, Any]) -> None:
               f"'models.{key}.concurrency' must be 1..64")
         if provider == "mediapipe":
             check(set(provides) == {"hands"}, f"'models.{key}': the mediapipe provider can only provide 'hands'")
+        if provider == "motion":
+            check(set(provides) == {"activity"}, f"'models.{key}': the motion provider can only provide 'activity'")
         if provider == "gemini":
             check(isinstance(spec.get("model"), str) and bool(spec.get("model")), f"'models.{key}.model' is required for gemini")
             check(isinstance(spec.get("location"), str) and bool(spec.get("location")),
                   f"'models.{key}.location' is required for gemini")
         if "content" in provides:
             content_models.append(key)
-            check(provider != "mediapipe", f"'models.{key}': the content model must be a vision-language model")
+            check(provider not in LOCAL_PROVIDERS, f"'models.{key}': the content model must be a vision-language model")
         for role in providers_of:
             if role in provides:
                 providers_of[role] += 1
-    check(len(content_models) == 1, f"exactly one model must provide 'content' (found {content_models})")
+    if get("content.enabled"):
+        check(len(content_models) == 1,
+              f"the content screen is switched on (content.enabled / --content-screen on), so exactly one model must "
+              f"provide 'content' (found {content_models}). See docs/ego_qa.md, 'Turning on the content screen'.")
+    else:
+        check(not content_models, f"content.enabled is false, so no model may provide 'content' (found {content_models})")
     minimum = get("cropping.min_models_per_decision")
     for role, count in providers_of.items():
         check(count >= minimum, f"{count} model(s) provide '{role}' but 'cropping.min_models_per_decision' is {minimum}")
     if problems:
         raise ConfigError("Invalid ego QA configuration:\n  - " + "\n  - ".join(problems))
+
+
+def processed_bucket(data: Any) -> str:
+    """Bucket the results are written to (source.processed_bucket; null = the source bucket)."""
+    get = data.get if isinstance(data, ResolvedConfig) else (lambda key: _get_dotted(data, key))
+    value = get("source.processed_bucket")
+    return get("source.bucket") if value is None else value
 
 
 def load_ego_configuration(project_root: Path, user_config_path: Path | None = None,

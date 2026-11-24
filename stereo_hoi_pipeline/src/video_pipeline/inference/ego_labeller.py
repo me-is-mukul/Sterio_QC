@@ -21,7 +21,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from video_pipeline.core.errors import InferenceError
+from video_pipeline.core.hashing import sha256_json
 from video_pipeline.inference.base import InferenceProvider, ProviderRequest
 from video_pipeline.inference.prompts import EGO_FRAME_SCHEMA, PromptTemplate, get_prompt
 from video_pipeline.inference.qwen_classifier import extract_json_object
@@ -81,6 +84,13 @@ class FrameLabeller:
     def describe(self) -> dict[str, Any]:
         raise NotImplementedError
 
+    def fingerprint(self) -> str:
+        """Identifies the model and its settings; cached answers of another fingerprint are not reused."""
+        return sha256_json(self.describe())[:16]
+
+    def begin_session(self, samples: Sequence[Sample], imu_t: np.ndarray, imu: np.ndarray) -> None:
+        """Called once per recording before labelling (for labellers that need more than one frame)."""
+
     def label(self, sample: Sample) -> dict[str, Any]:
         raise NotImplementedError
 
@@ -126,12 +136,14 @@ class MediaPipeHandsLabeller(FrameLabeller):
         from video_pipeline.hands.detector import MediaPipeStereoDetector, ensure_model  # noqa: PLC0415
 
         self._digest = ensure_model(model_path, logger)
+        self._settings = {k: v for k, v in settings.items() if k != "model_path"}
         self._detector = MediaPipeStereoDetector(model_path, settings)
         self._lock = threading.Lock()
 
     def describe(self) -> dict[str, Any]:
         return {"provider": "mediapipe", "model": "MediaPipe Hand Landmarker", "model_sha256": self._digest,
-                "mediapipe_version": self._detector.mediapipe_version, "provides": list(self.provides)}
+                "mediapipe_version": self._detector.mediapipe_version, "settings": self._settings,
+                "provides": list(self.provides)}
 
     def label(self, sample: Sample) -> dict[str, Any]:
         started = time.perf_counter()
@@ -147,6 +159,69 @@ class MediaPipeHandsLabeller(FrameLabeller):
 
     def close(self) -> None:
         self._detector.close()
+
+
+class MotionIdleLabeller(FrameLabeller):
+    """Model-free idle detection: a sample is idle when NOTHING moves around it.
+
+    Both must hold:
+      * the image barely changes between this sample and its neighbouring samples (previous and
+        next, ``labelling.interval_seconds`` apart): the share of changed pixels (blurred, downscaled
+        grey image, change > ``pixel_threshold`` grey levels) is at most ``max_changed_fraction``;
+      * the head is still: the median angular speed of the gyroscope within +/- half the sampling
+        interval is at most ``max_gyro_rad_s``.
+    A working wearer moves their hands (the image changes) or their head, so this only flags
+    stretches where the wearer is truly inactive; it errs on the side of keeping footage.
+    """
+
+    def __init__(self, key: str, concurrency: int, settings: Mapping[str, Any], interval_seconds: float) -> None:
+        super().__init__(key, ("activity",), concurrency)
+        self.settings = dict(settings)
+        self.interval_seconds = float(interval_seconds)
+        self._images: dict[int, Path] = {}
+        self._imu_t = np.zeros(0, dtype=np.int64)
+        self._gyro = np.zeros(0)
+
+    def describe(self) -> dict[str, Any]:
+        return {"provider": "motion", "model": "image change + gyroscope (no AI model)", "settings": self.settings,
+                "interval_seconds": self.interval_seconds, "provides": list(self.provides)}
+
+    def begin_session(self, samples: Sequence[Sample], imu_t: np.ndarray, imu: np.ndarray) -> None:
+        self._images = {s.index: s.image for s in samples}
+        self._imu_t = np.asarray(imu_t, dtype=np.int64)
+        self._gyro = np.linalg.norm(np.asarray(imu)[:, 0:3].astype(np.float64), axis=1) if len(imu) else np.zeros(0)
+
+    def _small(self, path: Path) -> np.ndarray:
+        import cv2  # noqa: PLC0415
+
+        gray = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+        if gray is None:
+            raise InferenceError(f"Cannot read sampled frame {path}")
+        width = int(self.settings["image_width"])
+        small = cv2.resize(gray, (width, max(1, round(gray.shape[0] * width / gray.shape[1]))),
+                           interpolation=cv2.INTER_AREA)
+        return cv2.GaussianBlur(small, (5, 5), 0).astype(np.int16)
+
+    def changed_fraction(self, a: Path, b: Path) -> float:
+        return float(np.mean(np.abs(self._small(a) - self._small(b)) > self.settings["pixel_threshold"]))
+
+    def label(self, sample: Sample) -> dict[str, Any]:
+        started = time.perf_counter()
+        if sample.index not in self._images:
+            return {"status": "failed", "error": "begin_session() was not called for this recording"}
+        changes = {}
+        for name, other in (("prev", sample.index - 1), ("next", sample.index + 1)):
+            if other in self._images:
+                changes[name] = round(self.changed_fraction(sample.image, self._images[other]), 5)
+        half = int(self.interval_seconds * 1e9 / 2)
+        lo, hi = np.searchsorted(self._imu_t, sample.t_ns - half), np.searchsorted(self._imu_t, sample.t_ns + half)
+        gyro = round(float(np.median(self._gyro[lo:hi])), 5) if hi - lo >= 10 else None
+        image_still = bool(changes) and max(changes.values()) <= self.settings["max_changed_fraction"]
+        head_still = gyro is not None and gyro <= self.settings["max_gyro_rad_s"]
+        return {"status": STATUS_OK, "latency_s": round(time.perf_counter() - started, 3),
+                "labels": {"activity": "idle" if image_still and head_still else "moving",
+                           "changed_prev": changes.get("prev"), "changed_next": changes.get("next"),
+                           "gyro_median_rad_s": gyro}}
 
 
 # ---------------------------------------------------------------------------------------------
@@ -189,7 +264,8 @@ def build_provider(spec: Mapping[str, Any], *, inference: Mapping[str, Any], env
 
 def build_labellers(models: Mapping[str, Mapping[str, Any]], *, inference: Mapping[str, Any],
                     mediapipe: Mapping[str, Any], environment: Mapping[str, str], gcp_project: str,
-                    credentials_factory: Callable[[], Any], project_root: Path) -> dict[str, FrameLabeller]:
+                    credentials_factory: Callable[[], Any], project_root: Path, motion: Mapping[str, Any],
+                    interval_seconds: float) -> dict[str, FrameLabeller]:
     prompt = get_prompt(inference["frame_prompt"])
     if prompt.response_schema is not EGO_FRAME_SCHEMA:
         raise InferenceError(f"'{inference['frame_prompt']}' is not a frame-labelling prompt.")
@@ -200,6 +276,9 @@ def build_labellers(models: Mapping[str, Mapping[str, Any]], *, inference: Mappi
             path = Path(mediapipe["model_path"])
             labellers[key] = MediaPipeHandsLabeller(key, concurrency, path if path.is_absolute() else project_root / path,
                                                     mediapipe)
+            continue
+        if spec["provider"] == "motion":
+            labellers[key] = MotionIdleLabeller(key, concurrency, motion, interval_seconds)
             continue
         provider = build_provider(spec, inference=inference, environment=environment, gcp_project=gcp_project,
                                   credentials_factory=credentials_factory)
@@ -248,7 +327,8 @@ def _read_cache(path: Path) -> dict[int, dict[str, Any]]:
 def label_samples(labeller: FrameLabeller, samples: Sequence[Sample], cache_path: Path, *,
                   max_failure_ratio: float, progress_every: int = 200) -> dict[int, dict[str, Any]]:
     cached = _read_cache(cache_path)
-    results = {i: r for i, r in cached.items() if r.get("status") == STATUS_OK}
+    fingerprint = labeller.fingerprint()
+    results = {i: r for i, r in cached.items() if r.get("status") == STATUS_OK and r.get("labeller") == fingerprint}
     todo = [s for s in samples if s.index not in results]
     logger.info("Model '%s': %d samples cached, %d to label (concurrency %d).", labeller.key, len(results), len(todo),
                 labeller.concurrency)
@@ -261,7 +341,8 @@ def label_samples(labeller: FrameLabeller, samples: Sequence[Sample], cache_path
                 record = labeller.label(sample)
             except Exception as exc:  # noqa: BLE001 (a crash in one sample must not lose the others)
                 record = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"[:500]}
-            return {"sample": sample.index, "frame": sample.frame, "t_s": round(sample.t_s, 3), **record}
+            return {"sample": sample.index, "frame": sample.frame, "t_s": round(sample.t_s, 3), "labeller": fingerprint,
+                    **record}
 
         with ThreadPoolExecutor(max_workers=max(1, labeller.concurrency)) as pool:
             futures = [pool.submit(run, s) for s in todo]
