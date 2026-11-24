@@ -64,12 +64,12 @@ The batch starts the models before the first recording, so a missing library sho
 | Step | Sheet | What it does |
 |---|---|---|
 | `extract` | 1 | Lists the session and detects its format; checks the format's required files and gap-free segment numbers. Then indexes every segment from the bucket (exact listed object version): per frame its capture time, keyframe flag, size and position; IMU; calibration. No video is written. |
-| `technical` | 1 | Pairs the eyes by capture time (≤ 3 unpaired frames trimmed at each end; any unpaired frame inside = FAIL). Frame timing (≈ 30 fps, no gap > 0.1 s), IMU (same clock, covers the video, no gap > 50 ms, rate steady within 5 % per 10 s; not checked for EGO-CAM), full decode of both eyes (no errors, every frame), black/frozen < 50 % per eye, length ≥ 30 s. The decode streams the video again straight into FFmpeg (one process per eye, or one for a side-by-side picture that is cut into the two eyes); the same pass writes the 2 s label frames and the calibration frames. Progress is logged every minute. |
+| `technical` | 1 | Pairs the eyes by capture time (≤ 3 unpaired frames trimmed at each end; any unpaired frame inside = FAIL). Frame timing: the camera runs at 30 ± 0.5 fps and at most 5 % of its frames are lost (`technical.max_missing_frame_share`; the reference QA accepts up to ~4 % and rejects from ~7 %); lost frames are not a FAIL below that, the kept footage is split at every gap > 0.25 s and the missing time is reported as "no video". IMU (same clock, covers the video, no gap > 50 ms, rate steady within 5 % per 10 s; not checked for EGO-CAM), full decode of both eyes (no decoder errors, every frame; FFmpeg messages about our own outputs, e.g. `[null @ …] non monotonically increasing dts to muxer`, are kept in the report as `output_errors` and do not fail it), black/frozen < 50 % per eye, length ≥ 30 s. The decode streams the video again straight into FFmpeg (one process per eye, or one for a side-by-side picture that is cut into the two eyes); the same pass writes the 2 s label frames and the calibration frames. Progress is logged every minute. |
 | `calibration` | 2 | Rectified if median vertical offset ≤ 1.5 px and p95 ≤ 5 px on ≥ 200 inlier matches over ≥ 10 held-out frame pairs; else unrectified. Eye order decided from the images. Never fails a recording. |
 | `labelling` | 4 | One left-eye frame every 2 s. Default: MediaPipe counts the wearer's hands (both/one/none); the motion check marks it idle or moving (see Models). |
-| `content_recording` | 3 | Off by default (`content.enabled: false`; the report says `"content": {"checked": false}`). With a content model: minor in ≥ 2 frames, lens covered/smudged or third-person in > 50 % of frames, or "no real work" for a strip of 16 frames over the recording → FAIL. |
-| `cropping` | 4 | Cut ≥ 10 s where all models say idle, and ≥ 10 s where all say no wearer hand. Pieces start/end on keyframes shared by both eyes; pieces < 30 s dropped; nothing ≥ 30 s left → FAIL. |
-| `content_clips` | 3 | Off by default (every piece is kept). With a content model: private moment in ≥ 2 frames, or "one trivial motion repeated" for a 12-frame strip → drop the piece. |
+| `content_recording` | 3 | Off by default (`content.enabled: false`; the report says `"content": {"checked": false}`). With a content model: "no real work" for a strip of 16 frames over the recording → FAIL. Minor, lens, headset not worn, phone and private moments are cut as stretches in `cropping` (`content.cut_as_stretches`, as the reference QA does); a flag removed from that list gets the old whole-recording rule (minor in ≥ 2 frames, lens / third-person in > 50 % → FAIL). |
+| `cropping` | 4 | Every sample gets its reasons to cut: idle, no wearer hand (all models agree), and with the content screen phone use, minor, private moment, lens blocked, headset not worn. A run of samples that each have a reason, spanning ≥ 10 s, is cut (`cropping.cut_seconds`; reasons may mix inside one run, as in the reference). Pieces are split at gaps of lost frames, start/end on keyframes shared by both eyes; pieces < 30 s dropped; nothing ≥ 30 s left → FAIL. |
+| `content_clips` | 3 | Off by default (every piece is kept). With a content model: "one trivial motion repeated" for a 12-frame strip → drop the piece. |
 | `clips` | — | Writes each kept piece: `left.mp4` + `right.mp4` (two-stream formats) or one `stereo_sbs.mp4` (side-by-side formats; each eye's x range is in `clip.json`), packets streamed from the bucket and copied, no re-encode, verified with ffprobe; plus `frame_times.csv`, `imu.csv`, `clip.json`. Each verified MP4 is uploaded and deleted before the next one is written. |
 
 Then `qa_report.json` is written and the rest is uploaded, `qa_report.json` last (it marks the
@@ -176,11 +176,27 @@ gs://op-datoric/processed/Op_DD/<date>/<device>/<session>/
   labels/               raw per-model answers (jsonl), strip answers, per-sample decisions
   logs/                 manifest.json  processing.log  resolved_config.yaml
   _<step>.json          intermediate result of each step
-gs://op-datoric/processed/_batches/<batch id>/  sessions.txt  summary.csv
+gs://op-datoric/processed/_batches/<batch id>/  sessions.txt  summary.csv  sheet.csv  detail.csv
 ```
 
 `summary.csv` has one row per recording (per segment for robocap): `session, status, reasons,
 source_seconds` (length of the paired video), `kept_seconds, clips, calibration, elapsed_s`.
+
+`sheet.csv` and `detail.csv` hold the same results in the reference QA's format
+(`reporting/reference_sheet.py`):
+
+* `sheet.csv`, one row per recording: `Upload date folder, Headset, Recording` (`raw/…/<session>#seg<N>`),
+  `Segment, Rig` (RoboCap, OpenRobot = hydra, Eye 2 = capture.egoc, Eye 2 (live), MCAP), `Status`
+  (Accepted / Accepted (partly cut) / Rejected / Error), `Source hours, Accepted hours, Reason`
+  ("Cut: Idle (no work in hand) 3.4 min, …", or why it was rejected), `Rejection group, Hours cut,
+  Hours with no video frames`. Source = accepted + cut + no video.
+* `detail.csv`, one row per removed stretch: start, end, length (s), main reason and the share of the
+  stretch's 2 s samples per reason ("Piece under 30 s between cuts" = a kept piece too short to keep).
+
+Recordings skipped because they were processed before are in the sheets too (their `qa_report.json`
+is read from the bucket), so running the same batch command again rebuilds both sheets in seconds.
+Reports written before the sheets existed have no per-sample shares: each of their stretches counts
+under one reason.
 
 * A FAILed recording gets the report, labels (if it got that far) and logs, no clips.
 * `upload.on_existing`: `skip` (default: a session with a `qa_report.json` is not redone without
@@ -204,8 +220,11 @@ source_seconds` (length of the paired video), `kept_seconds, clips, calibration,
   in either eye. Known limit, measured on a night recording: MediaPipe misses many hands in dark
   scenes, at the fisheye edge and under motion blur. Both eyes + 0.3 raised the frames with a
   found hand from 22 % to 42 % (kept footage 96 s → 159 s of 250 s) with no false hands on a static
-  recording, but some real work in dark footage is still cut as "no hands". Raise
-  `cropping.no_hands_cut_seconds` to cut less.
+  recording, but some real work in dark footage is still cut as "no hands". Measured against the reference QA
+  (8 SDC482 recordings, 2159 samples): MediaPipe finds no hand on 57 % of the samples the reference
+  keeps and 70 % of those it cuts, so only 62 % of the samples are judged the same. No setting of
+  the run length (10-60 s) or smoothing did better; the reference's cuts are mostly "Idle (no work in
+  hand)" and "Phone use", which need a vision-language model (`configs/ego_qa_gemini.yaml`).
 * `idle` (`provider: motion`): a sample is idle when nothing moves. The picture barely changes
   compared with the previous and the next sample (share of changed pixels ≤
   `motion.max_changed_fraction`), **and** the head is still (median gyroscope speed within ±1 s ≤
@@ -248,6 +267,13 @@ If the switch is `on` without a content model, the run stops before doing anythi
 "the content screen is switched on …, so exactly one model must provide 'content'". Recordings
 processed while it was off say `"content": {"checked": false}` in `qa_report.json`; to screen them
 too, run them again with `--force` (needs delete permission on the destination).
+
+**Optional, closest to the reference QA (billed):** `--config configs/ego_qa_gemini.yaml`. Gemini
+alone labels every 2 s frame with the reference's definitions (prompt `ego-qa-frame-v2`: hands in
+view counts a hand only partly in view or a held tool entering from the edge; idle = no work in hand;
+phone use, minor, private moment, lens blocked, headset not worn) and the content screen is on. One
+Gemini call per 2 s of video (900 per 30 min) plus a few strips; answers are cached, so a re-run does
+not pay again.
 
 **Optional, the sheet's full setup with vision-language models:**
 `--config configs/ego_qa_with_vlm.yaml` (two models: the endpoint in `.env` and Gemini on Vertex

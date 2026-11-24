@@ -18,6 +18,9 @@ models:
     concurrency: 8
     provides: [hands, activity, content]
 
+inference:
+  frame_prompt: ego-qa-frame-v2  # the reference QA's definitions (see configs/ego_qa_gemini.yaml)
+
 content:
   enabled: true                  # section 3 (minors, private moments, ...) judged by model_b
 

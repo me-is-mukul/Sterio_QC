@@ -31,6 +31,7 @@ import json
 import logging
 import shutil
 import time
+from collections import Counter
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -46,7 +47,14 @@ from video_pipeline.analysis.content_screen import (
     recording_frame_flags,
     recording_strip_finding,
 )
-from video_pipeline.analysis.cropping import decide_samples, defect_frame_ranges, flagged_runs, plan_pieces
+from video_pipeline.analysis.cropping import (
+    SampleDecision,
+    decide_samples,
+    defect_frame_ranges,
+    plan_pieces,
+    reason_runs,
+    removed_stretches,
+)
 from video_pipeline.core.config import ResolvedConfig
 from video_pipeline.core.ego_config import STEP_CONFIG_KEYS, processed_bucket
 from video_pipeline.core.errors import InferenceError, IngestionError, PipelineError
@@ -67,6 +75,7 @@ from video_pipeline.qc.technical import (
     common_keyframes,
     decode_recording,
     evaluate_technical,
+    frame_gaps,
     pair_eyes,
 )
 from video_pipeline.reporting.manifest import RunManifest
@@ -185,7 +194,8 @@ def run_session(session: SessionRef, services: Services, *, force: bool, upload:
     if upload and not force and on_existing == "skip" and services.storage.exists(bucket, existing_report):
         logger.info("%s: already processed (gs://%s/%s exists); skipped. Use --force to redo it.",
                     session.output_relative, bucket, existing_report)
-        return {"session": session.url, "status": "SKIPPED", "reasons": "already processed", "elapsed_s": 0.0}
+        return {"session": session.url, "status": "SKIPPED", "reasons": "already processed", "elapsed_s": 0.0,
+                "report": _existing_report(services, bucket, existing_report)}
 
     work_root = Path(cfg.get("work.directory"))
     work_root = work_root if work_root.is_absolute() else services.project_root / work_root
@@ -203,6 +213,15 @@ def run_session(session: SessionRef, services: Services, *, force: bool, upload:
                            argv=argv, started=started, force=force)
     finally:
         lock.release()
+
+
+def _existing_report(services: Services, bucket: str, name: str) -> dict[str, Any] | None:
+    """The qa_report.json of an earlier run (for the batch's sheets); None if it cannot be read."""
+    try:
+        return json.loads(services.storage.read_text(bucket, name))
+    except (PipelineError, ValueError) as exc:
+        logger.warning("Could not read gs://%s/%s for the batch sheets: %s", bucket, name, exc)
+        return None
 
 
 def _run_locked(session: SessionRef, services: Services, paths: SessionPaths, *, upload: bool, until: str | None,
@@ -276,7 +295,8 @@ def _run_locked(session: SessionRef, services: Services, paths: SessionPaths, *,
                 "kept_seconds": report["cropping"].get("kept_seconds") if report.get("cropping") else 0,
                 "clips": len(report.get("clips", [])),
                 "calibration": (report.get("calibration") or {}).get("result"),
-                "elapsed_s": round(time.perf_counter() - started, 1)}
+                "elapsed_s": round(time.perf_counter() - started, 1),
+                "report": report}
     except BaseException as exc:
         interrupted = isinstance(exc, KeyboardInterrupt)
         logger.error("Session %s %s: %s", session.output_relative, "interrupted" if interrupted else "failed", exc,
@@ -500,6 +520,17 @@ def _step_technical(state: State, services: Services) -> dict[str, Any]:
                                 required_checks=state.data["extract"]["required_files"],
                                 imu_unavailable=reader.imu_unavailable, frame_sequence=sequence,
                                 host_times=reader.host_clock)
+    # Gaps (lost frames) inside the paired range split the kept footage; their time is "no video".
+    gaps: list[tuple[int, float]] = []
+    if pairing["ok"] and n:
+        a, b = pairing["cam0_rows"]
+        seq = sequence[a:b] if sequence is not None and len(sequence) == len(full["cam0"]) else None
+        gaps = frame_gaps(tables["cam0"], tech["expected_fps"], tech["max_frame_gap_seconds"], seq)
+    lost = max((int(tm.get("dropped_frames_est") or 0) for tm in (result.get("frame_timing") or {}).values()),
+               default=0)
+    if gaps:
+        logger.info("%d gap(s) of lost frames over %s s; the kept footage is split there (%.1f s without video).",
+                    len(gaps), tech["max_frame_gap_seconds"], sum(s for _, s in gaps))
     expected_samples = -(-n // step) if n else 0
     if decode is not None:
         for cam, d in decode.items():
@@ -512,6 +543,8 @@ def _step_technical(state: State, services: Services) -> dict[str, Any]:
                   calibration_snapshot=calibration, decode=decode, imu_nominal_hz=nominal, format=reader.format,
                   layout=reader.layout, eye_crops=crops, imu_checked=reader.imu_unavailable is None,
                   imu_not_checked_reason=reader.imu_unavailable,
+                  gaps=[{"row": r, "missing_s": s} for r, s in gaps],
+                  no_video_seconds=round(lost / float(tech["expected_fps"]), 3),
                   fail_reasons=[{"section": "technical", "check": c["check"], "message": c["message"]}
                                 for c in result["checks"] if not c["passed"] and not c.get("informational")])
     for c in result["checks"]:
@@ -705,26 +738,30 @@ def _step_cropping(state: State, services: Services) -> dict[str, Any]:
     labels = _load_labels(state, services)
     provides = {k: spec["provides"] for k, spec in cfg.get("models").items()}
     sample_rows = [{"index": s.index, "frame": s.frame, "t_s": s.t_s} for s in samples]
-    decisions = decide_samples(sample_rows, labels, provides, min_models=crop["min_models_per_decision"])
-    cuts = flagged_runs(decisions, "idle", crop["idle_cut_seconds"], "idle") + \
-        flagged_runs(decisions, "no_hands", crop["no_hands_cut_seconds"], "no_hands")
+    content_model = _content_model(cfg)
+    decisions = decide_samples(sample_rows, labels, provides, min_models=crop["min_models_per_decision"],
+                               content_model=content_model,
+                               content_fields=cfg.get("content.cut_as_stretches") if content_model else ())
+    cuts = reason_runs(decisions, crop["cut_seconds"])
     ranges = [(c.first_frame, c.last_frame) for c in cuts]
     defects = []
     if crop["cut_defects"]:
         defects = defect_frame_ranges(state.data["technical"].get("defect_intervals_s", []), fps, n)
         ranges += defects
     keyframes = common_keyframes(tables["cam0"], tables["cam1"]).tolist()
+    splits = [g["row"] for g in state.data["technical"].get("gaps", [])]
     pieces = plan_pieces(n_frames=n, frame_times_s=times_s, keyframes=keyframes, cuts=ranges, fps=fps,
-                         min_piece_seconds=crop["min_piece_seconds"])
+                         min_piece_seconds=crop["min_piece_seconds"], splits=splits)
     kept = [p for p in pieces if p.kept]
     late = [p.to_dict() for p in kept if p.start_snap_s > crop["keyframe_snap_max_seconds"] + 1e-6]
     if late:
         logger.warning("%d piece(s) start more than %s s after their raw start (keyframes missing).", len(late),
                        crop["keyframe_snap_max_seconds"])
     write_json_atomic(state.paths.out / "labels" / "decisions.json", [d.__dict__ for d in decisions])
-    logger.info("Cropping: %d idle cut(s), %d no-hands cut(s), %d defect cut(s); %d piece(s), %d kept (%.1f s)",
-                sum(c.reason == "idle" for c in cuts), sum(c.reason == "no_hands" for c in cuts), len(defects),
-                len(pieces), len(kept), sum(p.duration_s for p in kept))
+    by_reason = Counter(c.reason for c in cuts)
+    logger.info("Cropping: %d cut(s) (%s), %d defect cut(s), %d gap split(s); %d piece(s), %d kept (%.1f s)",
+                len(cuts), ", ".join(f"{k} {v}" for k, v in by_reason.most_common()) or "none", len(defects),
+                len(splits), len(pieces), len(kept), sum(p.duration_s for p in kept))
     return {"cuts": [c.to_dict() for c in cuts], "defect_cuts_frames": defects, "pieces": [p.to_dict() for p in pieces],
             "kept_pieces": len(kept), "kept_seconds": round(sum(p.duration_s for p in kept), 3),
             "pieces_starting_late": late, "recording_seconds": round(float(times_s[-1]) + 1 / fps, 3) if n else 0.0,
@@ -869,6 +906,29 @@ def _write_labels_csv(state: State, services: Services) -> None:
             writer.writerow(row)
 
 
+def _final_stretches(state: State) -> list[dict[str, Any]]:
+    """Removed stretches of the recording with the share of their samples per reason (after the content
+    screen of the pieces), for the reference-format sheets (reporting/reference_sheet.py)."""
+    crop, final = state.data["cropping"], state.data.get("content_clips")
+    left, _ = _eyes(state)
+    t = np.load(state.paths.stream / f"{left}.npy", mmap_mode="r")["t_ns"].astype(np.int64)
+    if not len(t):
+        return []
+    decisions_path = state.paths.out / "labels" / "decisions.json"
+    decisions = [SampleDecision(**d) for d in read_json(decisions_path)] if decisions_path.is_file() else []
+    if final:
+        kept = [(p["start"], p["stop"]) for p in final["pieces"] if p["kept"]]
+        dropped = [(p["start"], p["stop"], p["findings"][0]["finding"] if p["findings"] else "content")
+                   for p in final["pieces"] if not p["kept"]]
+    else:
+        kept = [(p["start"], p["stop"]) for p in crop["pieces"] if p["kept"]]
+        dropped = []
+    return removed_stretches(n_frames=len(t), frame_times_s=(t - t[0]) / 1e9,
+                             fps=float(state.config.get("technical.expected_fps")), kept=kept,
+                             samples=[(d.frame, d.reasons) for d in decisions], cuts=crop["cuts"],
+                             defects=crop["defect_cuts_frames"], dropped=dropped)
+
+
 def _write_report(state: State, services: Services, upload_prefix: str | None, max_segments: int | None) -> dict[str, Any]:
     verdict = state.verdict or PASS
     d = state.data
@@ -922,7 +982,9 @@ def _write_report(state: State, services: Services, upload_prefix: str | None, m
                               "pieces": crop["pieces"], "recording_seconds": crop["recording_seconds"],
                               "kept_pieces": final["kept_pieces"] if final else crop["kept_pieces"],
                               "kept_seconds": final["kept_seconds"] if final else crop["kept_seconds"],
-                              "pieces_starting_late": crop["pieces_starting_late"]}
+                              "pieces_starting_late": crop["pieces_starting_late"],
+                              "no_video_seconds": (tech or {}).get("no_video_seconds", 0.0),
+                              "stretches": _final_stretches(state)}
     if "clips" in d:
         report["clips"] = [{k: c[k] for k in ("clip_id", "frames", "duration_s", "recording_time_s", "eyes", "files")}
                            | {"folder": f"clips/{c['clip_id']}/"} for c in d["clips"]["clips"]]

@@ -32,6 +32,12 @@ from video_pipeline.core.errors import ToolExecutionError
 from video_pipeline.core.pipe_feeder import PipeFeeder
 
 _LEVEL = re.compile(r"\[(error|fatal|panic)\]")
+# Messages about OUR outputs (the null muxer of the black/freeze branch, the JPEG/PNG writers), not about
+# the recording. Seen on robocap SDC482 session10 with all 53969 frames decoded:
+#   [null @ 0x55..] [error] Application provided invalid, non monotonically increasing dts to muxer in
+#   stream 0: 50001 >= 50001
+# Lost or broken frames still show up as decoder errors and as decoded frames != expected frames.
+_OUTPUT_SIDE = re.compile(r"\[(null|image2) @ |to muxer in stream")
 
 logger = logging.getLogger(__name__)
 
@@ -137,9 +143,15 @@ def parse_detection_file(path: Path, total_seconds: float, black_min_seconds: fl
 
 
 def decode_errors(stderr: str, harmless: Sequence[str] = ()) -> list[str]:
-    """Error-level lines of the FFmpeg log, without messages known to be harmless for this format."""
+    """Error-level lines of the FFmpeg log about the recording: without messages about our own outputs
+    (see _OUTPUT_SIDE) and without messages known to be harmless for this format."""
     return [line.strip() for line in stderr.splitlines()
-            if _LEVEL.search(line) and not any(h in line for h in harmless)]
+            if _LEVEL.search(line) and not _OUTPUT_SIDE.search(line) and not any(h in line for h in harmless)]
+
+
+def output_errors(stderr: str) -> list[str]:
+    """Error-level lines about our own outputs (kept in the report; they do not fail the recording)."""
+    return [line.strip() for line in stderr.splitlines() if _LEVEL.search(line) and _OUTPUT_SIDE.search(line)]
 
 
 def _last_progress_frame(path: Path) -> int | None:
@@ -310,6 +322,7 @@ def _decode(ffmpeg: str, stream: PacketStreamer, tables: Mapping[str, np.ndarray
                 "decode_errors": errors[:50],
                 "decode_error_count": len(errors),
                 "ignored_harmless_errors": list(harmless_errors),
+                "output_errors": output_errors(stderr)[:20],
                 "black_intervals": detections["black"],
                 "frozen_intervals": detections["frozen"],
                 "samples_written": len(list(eye.sample_dir.glob("*.jpg"))),
@@ -426,6 +439,38 @@ def frame_timing(table: np.ndarray, expected_fps: float, sequence: np.ndarray | 
     }
 
 
+def missing_share(timing: Mapping[str, Any]) -> float:
+    """Share of the frames the camera should have delivered that are missing (lost / dropped)."""
+    frames, lost = int(timing.get("frames") or 0), int(timing.get("dropped_frames_est") or 0)
+    return lost / (frames + lost) if frames + lost else 1.0
+
+
+def delivered_rate(timing: Mapping[str, Any]) -> float | None:
+    """The camera's frame rate. Camera clock: 1 / median interval (lost frames do not change it).
+    Host receive times: the mean rate counts the lost frames back in, so a camera that runs slow
+    (25 fps, no frame lost) is still told apart from one that loses frames."""
+    fps, frames = timing.get("fps"), int(timing.get("frames") or 0)
+    if fps is None or "clock" not in timing or frames < 2:
+        return fps
+    return fps * (frames - 1 + int(timing.get("dropped_frames_est") or 0)) / (frames - 1)
+
+
+def frame_gaps(table: np.ndarray, expected_fps: float, min_gap_seconds: float,
+               sequence: np.ndarray | None = None) -> list[tuple[int, float]]:
+    """Gaps longer than `min_gap_seconds` between consecutive frames: (row after the gap, seconds of
+    video missing). With ``sequence`` (camera frame counter) the gap is the counter jump, else the
+    time difference. Kept footage is split at these rows (no clip runs across missing video)."""
+    t = table["t_ns"].astype(np.int64)
+    if len(t) < 2:
+        return []
+    if sequence is not None and len(sequence) == len(t):
+        gap_s = np.diff(np.asarray(sequence, dtype=np.int64)) / expected_fps
+    else:
+        gap_s = np.diff(t) / 1e9
+    rows = np.flatnonzero(gap_s > min_gap_seconds)
+    return [(int(r) + 1, round(float(gap_s[r]) - 1.0 / expected_fps, 4)) for r in rows]
+
+
 def pair_eyes(cam0: np.ndarray, cam1: np.ndarray, *, tolerance_ns: int, max_edge_frames: int) -> dict[str, Any]:
     """Match the two eyes' frames by capture time.
 
@@ -521,10 +566,17 @@ def evaluate_technical(*, listing: Mapping[str, Any], segment_summaries: Sequenc
                   for cam, table in (("cam0", cam0), ("cam1", cam1))}
         info["frame_timing"] = timing
         for cam, tm in timing.items():
-            ok = (tm["frames"] >= 2 and tm["fps"] is not None and abs(tm["fps"] - fps) <= cfg["fps_tolerance"]
-                  and tm["non_monotonic"] == 0 and tm["max_gap_s"] <= cfg["max_frame_gap_seconds"])
+            # A few lost frames do not fail a recording (the reference QA accepts up to ~4 % and
+            # rejects from ~7 %): the kept footage is split at longer gaps and the missing time is
+            # reported as "no video". A wrong frame rate or too many lost frames fail it.
+            rate, missing = delivered_rate(tm), missing_share(tm)
+            tm = {**tm, "missing_share": round(missing, 4)}
+            ok = (tm["frames"] >= 2 and rate is not None and abs(rate - fps) <= cfg["fps_tolerance"]
+                  and tm["non_monotonic"] == 0 and missing <= cfg["max_missing_frame_share"])
             checks.append(_check(f"frame_timing_{cam}", ok,
-                                 f"{cam}: {tm['frames']} frames, {tm['fps']} fps, max gap {tm['max_gap_s']} s, "
+                                 f"{cam}: frame rate {round(rate, 2) if rate is not None else None} fps "
+                                 f"({fps:g} fps required); {missing:.1%} of frames missing (fail above "
+                                 f"{cfg['max_missing_frame_share']:.0%}); max gap {tm['max_gap_s']} s; "
                                  f"{tm['non_monotonic']} non-increasing timestamps", **tm))
         if pairing is not None:
             checks.append(_check("eyes_paired", pairing["ok"], pairing.get("message", ""),

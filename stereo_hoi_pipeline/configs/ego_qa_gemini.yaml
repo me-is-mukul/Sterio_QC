@@ -1,0 +1,28 @@
+# OPTIONAL, BILLED: Gemini alone labels every sampled frame (hands, work / idle, phone, minors, private
+# moments, lens, headset not worn) with the reference QA's definitions (prompt ego-qa-frame-v2).
+# This is the setup closest to the reference results: its cuts are mostly "Idle (no work in hand)" and
+# "Phone use", which a hand detector and a motion check cannot see.
+#
+#   python scripts/run_gcs_batch.py --config configs/ego_qa_gemini.yaml --source gs://... --dest gs://...
+#
+# Cost: one Gemini call per 2 s of video (900 per 30 min recording) plus one strip of 16 frames per
+# recording and one of 12 per kept piece. Answers are cached in labels/, so a re-run does not pay again.
+# Needs: Vertex AI enabled; the VM's service account needs roles/aiplatform.user.
+# `models` replaces the default models as a whole.
+
+models:
+  gemini:
+    provider: gemini
+    model: gemini-3.5-flash
+    location: asia-south1        # same region as my-vm
+    concurrency: 8
+    provides: [hands, activity, content]
+
+inference:
+  frame_prompt: ego-qa-frame-v2
+
+content:
+  enabled: true
+
+cropping:
+  min_models_per_decision: 1     # one model decides (the QA sheet asks for 2: see ego_qa_with_vlm.yaml)

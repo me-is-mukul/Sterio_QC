@@ -35,3 +35,6 @@ class LocalStorage:
 
     def exists(self, bucket: str, name: str) -> bool:
         return (self.root / name).is_file()
+
+    def read_text(self, bucket: str, name: str) -> str:
+        return (self.root / name).read_text(encoding="utf-8")

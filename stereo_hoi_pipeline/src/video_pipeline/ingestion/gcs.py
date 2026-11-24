@@ -200,6 +200,13 @@ class GcsStorage:
         except Exception as exc:  # noqa: BLE001
             raise IngestionError(f"Cannot check gs://{bucket}/{name}: {exc}") from exc
 
+    def read_text(self, bucket: str, name: str) -> str:
+        """A small text object (e.g. a qa_report.json), read into memory."""
+        try:
+            return self._client.bucket(bucket).blob(name).download_as_bytes().decode("utf-8")
+        except Exception as exc:  # noqa: BLE001
+            raise IngestionError(f"Cannot read gs://{bucket}/{name}: {exc}") from exc
+
     def open_reader(self, bucket: str, obj: ObjectInfo, *, chunk_bytes: int):
         """A seekable, read-only stream of exactly the listed generation (ranged reads, retried).
         Nothing is written to disk. Use as a context manager."""

@@ -10,6 +10,10 @@ Clip level (drop the clip):
   private moment           >= content.private_min_frames samples inside the clip flagged
   one trivial motion       the clip strip is judged trivial_repeated_motion
 Shares and counts use the content model's successful answers only.
+
+A flag listed in content.cut_as_stretches (default: minor, private moment, phone use, lens, headset
+not worn) is cut out as a stretch in section 4 instead (as the reference QA does: it cuts the seconds
+with a minor in view and keeps the rest), so its whole-recording / whole-clip rule above is skipped.
 """
 
 from __future__ import annotations
@@ -46,15 +50,16 @@ def recording_frame_flags(content_records: Mapping[int, Mapping[str, Any]], samp
     desk = flagged("desk_or_computer_work")
     working = sum(1 for lab in labels.values() if lab.get("activity") == "working")
     share = (lambda k: round(len(k) / n, 4) if n else 0.0)
+    stretches = set(cfg.get("cut_as_stretches", ()))
     findings = []
-    if len(minors) >= cfg["minor_min_frames"]:
+    if "minor_visible" not in stretches and len(minors) >= cfg["minor_min_frames"]:
         findings.append({"finding": "minor_in_view", "action": "drop_recording",
                          "message": f"a minor was seen in {len(minors)} sampled frames",
                          "times_s": [sample_times[i] for i in minors][:50]})
-    if n and share(third) > cfg["third_person_max_share"]:
+    if "third_person_or_fixed_camera" not in stretches and n and share(third) > cfg["third_person_max_share"]:
         findings.append({"finding": "third_person_or_fixed_camera", "action": "drop_recording",
                          "message": f"{share(third):.0%} of the samples are not from a head-worn camera"})
-    if n and share(lens) > cfg["lens_max_share"]:
+    if "lens_covered_or_smudged" not in stretches and n and share(lens) > cfg["lens_max_share"]:
         findings.append({"finding": "lens_covered_or_smudged", "action": "drop_recording",
                          "message": f"lens covered or smudged in {share(lens):.0%} of the samples"})
     return {
@@ -80,7 +85,7 @@ def clip_findings(piece_samples: Sequence[int], content_records: Mapping[int, Ma
     labels = _ok_labels(content_records)
     private = sorted(i for i in piece_samples if labels.get(i, {}).get("private_moment") is True)
     findings = []
-    if len(private) >= cfg["private_min_frames"]:
+    if "private_moment" not in set(cfg.get("cut_as_stretches", ())) and len(private) >= cfg["private_min_frames"]:
         findings.append({"finding": "private_moment", "action": "drop_clip",
                          "message": f"private moment (bathroom / personal phone use) in {len(private)} sampled frames",
                          "times_s": [sample_times[i] for i in private][:50]})

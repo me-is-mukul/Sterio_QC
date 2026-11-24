@@ -31,6 +31,7 @@ from video_pipeline.core.io import utc_now, write_text_atomic
 from video_pipeline.core.logging_setup import LoggingController
 from video_pipeline.ingestion.formats import PER_SEGMENT_FORMATS, classify, detect_format
 from video_pipeline.ingestion.gcs import GcsStorage, SessionRef, parse_gs_url
+from video_pipeline.reporting.reference_sheet import detail_csv, sheet_csv
 
 EXIT_OK, EXIT_ERRORS, EXIT_USAGE, EXIT_INTERRUPTED = 0, 1, 2, 130
 SUMMARY_FIELDS = ["session", "status", "reasons", "source_seconds", "kept_seconds", "clips", "calibration",
@@ -375,16 +376,20 @@ def _write_batch_summary(config, project_root, storage, batch_id, sessions, rows
     folder = work / "_batches" / batch_id
     write_text_atomic(folder / "sessions.txt", "".join(s.url + "\n" for s in sessions))
     write_text_atomic(folder / "summary.csv", _summary_csv(rows))
+    # the same results in the reference QA's format (one row per recording / per removed stretch)
+    write_text_atomic(folder / "sheet.csv", sheet_csv(rows))
+    write_text_atomic(folder / "detail.csv", detail_csv(rows))
     counts = defaultdict(int)
     for r in rows:
         counts[r["status"]] += 1
-    log.info("Batch %s finished: %s. Summary: %s", batch_id, dict(counts), folder / "summary.csv")
+    log.info("Batch %s finished: %s. Summary: %s (reference format: sheet.csv, detail.csv)", batch_id, dict(counts),
+             folder / "summary.csv")
     for r in rows:
         log.info("  %-11s %s %s", r["status"], r["session"], ("- " + r["reasons"]) if r.get("reasons") else "")
     if upload:
         prefix = f"{config.get('source.processed_root')}_batches/{batch_id}/"
         try:
-            for name in ("sessions.txt", "summary.csv"):
+            for name in ("sessions.txt", "summary.csv", "sheet.csv", "detail.csv"):
                 storage.upload(folder / name, processed_bucket(config), prefix + name, overwrite=False,
                                content_type="text/plain" if name.endswith(".txt") else "text/csv")
             log.info("Batch summary uploaded to gs://%s/%s", processed_bucket(config), prefix)

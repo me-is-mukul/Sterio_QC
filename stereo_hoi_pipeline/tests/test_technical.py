@@ -8,6 +8,10 @@ from video_pipeline.qc.technical import (
     calibration_frame_indices,
     decode_errors,
     DecodeSettings,
+    delivered_rate,
+    frame_gaps,
+    missing_share,
+    output_errors,
     evaluate_technical,
     EyeOutput,
     frame_timing,
@@ -148,7 +152,7 @@ def _cfg():
     return {"expected_fps": 30, "fps_tolerance": 0.5, "max_frame_gap_seconds": 0.1, "max_eye_offset_ms": 5,
             "max_unpaired_edge_frames": 3, "imu_max_gap_seconds": 0.05, "imu_coverage_tolerance_seconds": 0.1,
             "imu_same_clock_max_offset_seconds": 5, "imu_rate_window_seconds": 10, "imu_rate_tolerance": 0.05,
-            "max_defect_fraction": 0.5, "min_recording_seconds": 30}
+            "max_defect_fraction": 0.5, "min_recording_seconds": 30, "max_missing_frame_share": 0.05}
 
 
 def test_required_files_first_segment_missing():
@@ -196,3 +200,56 @@ def test_frame_timing_mean_rate_without_counter():
     r = frame_timing(tab, 30, mean_rate=True)
     assert 27.5 < r["fps"] < 28.5 and r["dropped_frames_est"] == 40 and r["max_gap_s"] == round(2 * DT / NS, 4)
     assert frame_timing(tab, 30)["fps"] == round(NS / DT, 4)            # the median rule would not see it
+
+
+def test_muxer_messages_are_not_decode_errors():
+    # robocap SDC482 session10 seg1: every frame decoded, one message from our own null output
+    stderr = "\n".join([
+        "[null @ 0x558c513148c0] [error] Application provided invalid, non monotonically increasing dts to "
+        "muxer in stream 0: 50001 >= 50001",
+        "[image2 @ 0x1] [error] Could not get frame filename number 2 from pattern",
+        "[hevc @ 0x3] [error] Could not find ref with POC 3",
+    ])
+    assert decode_errors(stderr) == ["[hevc @ 0x3] [error] Could not find ref with POC 3"]
+    assert len(output_errors(stderr)) == 2
+
+
+def _timing_check(cam0, cam1, **kw):
+    listing = {"session_json": {"name": "x"}, "segments": [{"number": 0}]}
+    r = evaluate_technical(listing=listing, segment_summaries=[], cam0=cam0, cam1=cam1, imu_t=None,
+                           imu_nominal_hz=None, decode=None, cfg=_cfg(), **kw)
+    return {c["check"]: c for c in r["checks"]}
+
+
+def test_a_few_lost_frames_pass_and_many_fail():
+    few = table(1800, drop=set(range(500, 530)))                       # 30 of 1800 lost: 1.7 %
+    checks = _timing_check(few, few)
+    assert checks["frame_timing_cam0"]["passed"] and checks["frame_timing_cam0"]["missing_share"] < 0.02
+    many = table(1800, drop=set(range(500, 650)))                      # 150 lost: 8.3 % (reference: rejected)
+    checks = _timing_check(many, many)
+    assert not checks["frame_timing_cam0"]["passed"] and "8.3% of frames missing" in checks["frame_timing_cam0"]["message"]
+
+
+def test_slow_camera_on_host_clock_fails_although_no_frame_is_lost():
+    n = 750                                                             # 25 fps, the counter never jumps
+    tab = np.zeros(n, dtype=FRAME_DTYPE)
+    tab["t_ns"] = 10 * NS + np.arange(n) * (NS // 25)
+    seq = np.arange(n)
+    tm = frame_timing(tab, 30, seq)
+    assert missing_share(tm) == 0 and abs(delivered_rate(tm) - 25) < 0.01
+    checks = _timing_check(tab, tab, frame_sequence=seq, host_times=True)
+    assert not checks["frame_timing_cam0"]["passed"]
+    seq_lost = seq.copy()
+    seq_lost[400:] += 20                                                # 30 fps camera that lost 20 frames
+    tab30 = np.zeros(n, dtype=FRAME_DTYPE)
+    tab30["t_ns"] = 10 * NS + seq_lost * DT
+    assert abs(delivered_rate(frame_timing(tab30, 30, seq_lost)) - 30) < 0.1
+
+
+def test_frame_gaps_from_times_and_from_the_counter():
+    tab = table(300, drop=set(range(100, 115)))                         # 0.5 s lost after row 99
+    assert frame_gaps(tab, 30, 0.25) == [(100, 0.5)]
+    assert frame_gaps(table(300, drop={50}), 30, 0.25) == []            # one lost frame: no split
+    seq = np.arange(300)
+    seq[200:] += 9
+    assert frame_gaps(table(300), 30, 0.25, seq) == [(200, round(10 / 30 - 1 / 30, 4))]

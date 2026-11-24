@@ -116,6 +116,37 @@ Respond ONLY with JSON matching the requested schema."""
 
 _EGO_FRAME_USER = """Frame at {timestamp} s of the recording (left eye). Return the JSON."""
 
+# v2: the definitions of the reference QA (its cut reasons: Idle (no work in hand), Wearer's hands not
+# in view, Phone use, Person under 18 in view, Private moment, Lens blocked or out of focus, Headset not
+# worn). Matched to its decisions on robocap SDC482 (01-11-2026): walking with a duster whose handle
+# enters the frame, the hand itself just below it, is kept as work with hands in view.
+_EGO_FRAME_SYSTEM_V2 = """You review frames from egocentric video: a camera worn on the head of a worker (the "wearer").
+The image is one frame from the wearer's LEFT eye camera. It may show strong fisheye distortion.
+Footage is kept for training robots on manual work; your answers decide which seconds are cut.
+
+Answer each field about THIS frame only:
+- hands: how many of the WEARER's own hands are in view: "both", "one" or "none". The wearer's hands
+  enter from the bottom or sides of the frame, close to the camera. Count a hand that is only partly
+  in view (fingers or part of a hand at the edge, a gloved hand). Also answer at least "one" when a tool
+  or object the wearer is clearly holding enters from the bottom or side edge (e.g. a broom or duster
+  handle), even if the hand itself is just outside the frame. "none" = nothing of the wearer's hands and
+  nothing they hold is in view. Other people's hands do not count.
+- activity: "working" if the wearer has work in hand: handling, using, holding or carrying a tool,
+  material or object as part of a task, including carrying a work tool while moving between spots.
+  "idle" = no work in hand: empty-handed walking or standing, waiting, resting, eating, talking,
+  looking around, or using a phone. Phone use is ALWAYS "idle".
+- phone_use: the wearer is using or holding up a mobile phone (screen in view, typing, calling).
+- minor_visible: a child or teenager (anyone who may be under 18) is visible.
+- third_person_or_fixed_camera: the headset is NOT worn: the camera lies on a table or the floor,
+  is held in the hand, or films the worker from outside.
+- lens_covered_or_smudged: the lens is blocked (finger, cloth, cap), or the picture is so out of focus,
+  fogged or smudged that the scene cannot be made out.
+- desk_or_computer_work: the wearer works at a desk, on a computer, laptop, tablet or paperwork.
+- private_moment: a bathroom/toilet is visible, or someone is undressing or changing clothes.
+- description: one short factual sentence.
+
+Respond ONLY with JSON matching the requested schema."""
+
 EGO_RECORDING_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -165,6 +196,7 @@ _EGO_CLIP_USER = """{count} frames from a clip of {duration} s. Frame times (s):
 PROMPTS: dict[str, PromptTemplate] = {
     "hoi-stereo-v1": PromptTemplate("hoi-stereo-v1", _V1_SYSTEM, _V1_USER, HOI_RESPONSE_SCHEMA),
     "ego-qa-frame-v1": PromptTemplate("ego-qa-frame-v1", _EGO_FRAME_SYSTEM, _EGO_FRAME_USER, EGO_FRAME_SCHEMA),
+    "ego-qa-frame-v2": PromptTemplate("ego-qa-frame-v2", _EGO_FRAME_SYSTEM_V2, _EGO_FRAME_USER, EGO_FRAME_SCHEMA),
     "ego-qa-recording-v1": PromptTemplate("ego-qa-recording-v1", _EGO_RECORDING_SYSTEM, _EGO_RECORDING_USER,
                                           EGO_RECORDING_SCHEMA),
     "ego-qa-clip-v1": PromptTemplate("ego-qa-clip-v1", _EGO_CLIP_SYSTEM, _EGO_CLIP_USER, EGO_CLIP_SCHEMA),

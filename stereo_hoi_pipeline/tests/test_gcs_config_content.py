@@ -69,7 +69,7 @@ def test_classify_segments_numeric_order_and_extras():
 
 def test_default_config_is_valid():
     cfg = load_ego_configuration(find_project_root())
-    assert cfg.get("labelling.interval_seconds") == 2 and cfg.get("cropping.idle_cut_seconds") == 10
+    assert cfg.get("labelling.interval_seconds") == 2 and cfg.get("cropping.cut_seconds") == 10
     assert cfg.get("cropping.min_piece_seconds") == 30
     assert cfg.get("calibration.max_median_vertical_px") == 1.5 and cfg.get("calibration.max_p95_vertical_px") == 5.0
 

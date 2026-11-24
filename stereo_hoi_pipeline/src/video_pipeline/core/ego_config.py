@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from video_pipeline.analysis.cropping import CONTENT_FLAGS
 from video_pipeline.core.config import (
     CONFIG_DIRECTORY_NAME,
     ResolvedConfig,
@@ -64,6 +65,7 @@ _SCHEMA: dict[str, tuple[type, ...]] = {
     "technical.expected_fps": _N,
     "technical.fps_tolerance": _N,
     "technical.max_frame_gap_seconds": _N,
+    "technical.max_missing_frame_share": _N,
     "technical.max_eye_offset_ms": _N,
     "technical.max_unpaired_edge_frames": (int,),
     "technical.imu_max_gap_seconds": _N,
@@ -119,8 +121,8 @@ _SCHEMA: dict[str, tuple[type, ...]] = {
     "content.recording_strip_frames": (int,),
     "content.private_min_frames": (int,),
     "content.clip_strip_frames": (int,),
-    "cropping.idle_cut_seconds": _N,
-    "cropping.no_hands_cut_seconds": _N,
+    "content.cut_as_stretches": (list,),
+    "cropping.cut_seconds": _N,
     "cropping.min_models_per_decision": (int,),
     "cropping.cut_defects": (bool,),
     "cropping.keyframe_snap_max_seconds": _N,
@@ -137,7 +139,7 @@ STEP_CONFIG_KEYS: dict[str, tuple[str, ...]] = {
     "calibration": ("calibration",),
     "labelling": ("labelling", "models", "inference.frame_prompt", "inference.temperature", "mediapipe", "motion"),
     "content_recording": ("content", "inference.recording_prompt", "inference.temperature"),
-    "cropping": ("cropping", "technical.expected_fps"),
+    "cropping": ("cropping", "technical.expected_fps", "content.enabled", "content.cut_as_stretches"),
     "content_clips": ("content", "inference.clip_prompt", "inference.temperature"),
     "clips": ("cropping",),
 }
@@ -202,6 +204,7 @@ def validate_ego_config(data: Mapping[str, Any]) -> None:
     check(get("technical.max_eye_offset_ms") * get("technical.expected_fps") < 500,
           "'technical.max_eye_offset_ms' must be under half a frame interval (else neighbouring frames would pair)")
     check(0 <= get("technical.max_unpaired_edge_frames") <= 30, "'technical.max_unpaired_edge_frames' must be 0..30")
+    check(0 <= get("technical.max_missing_frame_share") < 1, "'technical.max_missing_frame_share' must be in [0, 1)")
     check(0 < get("technical.max_defect_fraction") <= 1, "'technical.max_defect_fraction' must be in (0, 1]")
     check(0 < get("technical.imu_rate_tolerance") < 1, "'technical.imu_rate_tolerance' must be in (0, 1)")
     check(0 <= get("technical.black_pixel_threshold") <= 1, "'technical.black_pixel_threshold' must be 0..1")
@@ -230,7 +233,10 @@ def validate_ego_config(data: Mapping[str, Any]) -> None:
         check(2 <= get(f"content.{key}") <= 32, f"'content.{key}' must be 2..32")
     for key in ("third_person_max_share", "lens_max_share"):
         check(0 < get(f"content.{key}") <= 1, f"'content.{key}' must be in (0, 1]")
-    for key in ("idle_cut_seconds", "no_hands_cut_seconds", "min_piece_seconds", "keyframe_snap_max_seconds"):
+    stretch_flags = get("content.cut_as_stretches")
+    check(isinstance(stretch_flags, list) and set(stretch_flags) <= set(CONTENT_FLAGS),
+          f"'content.cut_as_stretches' must be a list of {list(CONTENT_FLAGS)}")
+    for key in ("cut_seconds", "min_piece_seconds", "keyframe_snap_max_seconds"):
         check(get(f"cropping.{key}") > 0, f"'cropping.{key}' must be > 0")
     check(get("cropping.min_models_per_decision") >= 1, "'cropping.min_models_per_decision' must be >= 1")
     check(16 <= get("motion.image_width") <= 1280, "'motion.image_width' must be 16..1280")

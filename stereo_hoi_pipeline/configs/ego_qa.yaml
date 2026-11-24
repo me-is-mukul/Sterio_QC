@@ -80,8 +80,13 @@ formats:
 # Section 1: technical checks (whole recording). Any failure = FAIL.
 technical:
   expected_fps: 30
-  fps_tolerance: 0.5             # median frame rate must be within expected_fps +/- this
-  max_frame_gap_seconds: 0.1     # a longer gap between consecutive frames = irregular frame rate
+  fps_tolerance: 0.5             # the camera's frame rate must be within expected_fps +/- this
+  # Lost frames. The reference QA accepts recordings with up to ~4 % of the frames missing and rejects
+  # them from ~7 %; it does not count the missing time as accepted. Same here: more than this share
+  # missing = FAIL; otherwise the kept footage is split at every gap longer than max_frame_gap_seconds
+  # (no clip runs across missing video) and the missing time is reported as "no video".
+  max_missing_frame_share: 0.05
+  max_frame_gap_seconds: 0.25    # host receive times jitter by ~0.1 s without any frame lost
   max_eye_offset_ms: 5           # left/right capture times of one frame pair (measured: ~0.01 ms)
   # One eye may start earlier / stop later by a frame or two (seen: cam1 kept 1 extra frame at the
   # end; robocap SDC482 session31: cam0 lost its 2nd frame, so its 1st frame matched nothing). Up to
@@ -200,17 +205,24 @@ motion:
 # vision-language model that is not configured yet (see the commented `content` model above).
 content:
   enabled: false
-  minor_min_frames: 2            # D6: frames showing a minor -> drop the recording
+  # Content flags cut out as stretches in section 4, like idle / no hands (10 s rule), as the reference
+  # QA does (762 stretches cut for a person under 18, only 2 recordings rejected for it). A flag listed
+  # here no longer drops the whole recording / clip by the rules below. Remove a flag to get the D6 rule.
+  cut_as_stretches: [minor_visible, private_moment, phone_use, lens_covered_or_smudged,
+                     third_person_or_fixed_camera]
+  minor_min_frames: 2            # D6: frames showing a minor -> drop the recording (if not cut as stretches)
   third_person_max_share: 0.5    # D6: "most of the recording"
   lens_max_share: 0.5            # D6: "most of the recording"
   recording_strip_frames: 16     # frames sent together to judge "no work / staged work"
-  private_min_frames: 2          # D6: frames with a private moment -> drop the clip
+  private_min_frames: 2          # D6: frames with a private moment -> drop the clip (if not cut as stretches)
   clip_strip_frames: 12          # frames sent together to judge "one trivial motion repeated"
 
 # Section 4: time cropping.
 cropping:
-  idle_cut_seconds: 10           # run of all-idle samples spanning >= this (t_last - t_first) is cut (D3)
-  no_hands_cut_seconds: 10       # same for "no wearer hand visible" (D2: all models must agree)
+  # A run of consecutive samples that each have a reason to cut (idle, no wearer hand, and the content
+  # flags above) spanning >= this (t_last - t_first) is cut (D2, D3). Reasons may mix inside one run,
+  # as in the reference QA (its shortest cuts are 10 s, for every reason).
+  cut_seconds: 10
   min_models_per_decision: 1     # models that must label hands/activity (the QA sheet asks for 2)
   cut_defects: true              # also cut black/frozen stretches found in section 1
   keyframe_snap_max_seconds: 1
