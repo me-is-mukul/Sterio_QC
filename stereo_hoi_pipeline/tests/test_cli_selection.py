@@ -10,6 +10,7 @@ from video_pipeline.ego_cli import (
     expand_segments,
     folder_prefix,
     format_session_list,
+    group_by_folder,
     select_range,
     session_root,
     source_root,
@@ -78,9 +79,17 @@ def test_discover_sessions_numbering_and_formats():
     one, _ = discover_sessions(FakeStorage(OBJECTS), "b", "raw/d1/devA/session_00002-9/", PATTERN)
     assert [s["url"] for s in one] == ["gs://b/raw/d1/devA/session_00002-9/"]
     text = format_session_list(found, skipped, 2, 3)
-    assert ">   2" in text and ">   3" in text and "    1" in text and "selected by --start 2 --end 3: 2 sessions" in text
-    assert "robocap: 3" in text and "mcap: 4" in text and "2 folder(s) without a recording" in text
-    assert "one segment  gs://b/raw/d3/R1/20260518_154730_session1/#seg2" in text
+    assert ">   2" in text and ">   3" in text and "    1" in text
+    assert "selected by --start 2 --end 3: 2 sessions (2 recordings)" in text
+    assert "9 sessions" in text and "robocap: 2" in text and "mcap: 4" in text and "2 folder(s) without a recording" in text
+    # a robocap folder is ONE numbered session (its segments are judged one by one)
+    assert "   6  robocap" in text and "2 segments  gs://b/raw/d3/R1/20260518_154730_session1/" in text
+    assert "#seg" not in text
+    assert "their 3 robocap segments are judged one by one" in text
+    assert "selected by --start 6 --end 7: 2 sessions (3 recordings)" in format_session_list(found, skipped, 6, 7)
+    chosen = select_range(group_by_folder(found), 6, 6)
+    assert [s["url"][len("gs://b/raw/"):] for g in chosen for s in g] == [
+        "d3/R1/20260518_154730_session1/#seg1", "d3/R1/20260518_154730_session1/#seg2"]
     # a recording folder given as the source: sessions are named below its parent
     robo = "raw/d3/R1/20260518_154730_session1/"
     one, _ = discover_sessions(FakeStorage(OBJECTS), "b", robo, PATTERN)

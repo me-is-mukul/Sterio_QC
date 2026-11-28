@@ -49,9 +49,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Folder to write results to; each result goes to <dest>/<path of the session below the "
                         "source folder>/. Default: source.processed_bucket + source.processed_root of the config.")
     p.add_argument("--start", type=int, metavar="N",
-                   help="First session to process: its number in the --list-sessions list (1 = first). Default 1.")
+                   help="First session folder to process: its number in the --list-sessions list (1 = first). "
+                        "Every segment of each chosen folder is processed. Default 1.")
     p.add_argument("--end", type=int, metavar="N",
-                   help="Last session to process (inclusive), as numbered by --list-sessions. Default: the last.")
+                   help="Last session folder to process (inclusive), as numbered by --list-sessions. Default: the last.")
     p.add_argument("--session", action="append", metavar="GS_URL",
                    help="Instead of the whole source folder: this session folder (repeatable).")
     p.add_argument("--sessions-file", type=Path, metavar="FILE",
@@ -180,23 +181,42 @@ def select_range(items: Sequence, start: int | None, end: int | None) -> list:
     return list(items[first - 1:last])
 
 
-def format_session_list(found: Sequence[dict], skipped: int, start: int | None, end: int | None) -> str:
-    first = 1 if start is None else start
-    last = len(found) if end is None else end
-    marked = start is not None or end is not None
-    lines = [f"{'>' if marked and first <= n <= last else ' '}{n:4d}  {s['format']:<12} {s['bytes'] / 1e9:8.2f} GB"
-             f"  {('one segment' if s.get('segment') is not None else str(s['segments']) + ' segments'):>12}  {s['url']}"
-             for n, s in enumerate(found, start=1)]
-    by_format: dict[str, int] = defaultdict(int)
+def group_by_folder(found: Sequence[dict]) -> list[list[dict]]:
+    """Found recordings grouped by session folder, in order: a robocap folder's segments form one
+    session (one number for --start/--end), each segment still judged as a recording of its own."""
+    groups: dict[str, list[dict]] = {}
     for s in found:
-        by_format[s["format"]] += 1
-    lines.append(f"{len(found)} recordings, {sum(s['bytes'] for s in found) / 1e9:.1f} GB"
+        groups.setdefault(s.get("folder", s["url"]), []).append(s)
+    return list(groups.values())
+
+
+def _segments_text(group: Sequence[dict]) -> str:
+    n = len(group) if group[0].get("segment") is not None else group[0]["segments"]
+    return f"{n} segment{'s' if n != 1 else ''}"
+
+
+def format_session_list(found: Sequence[dict], skipped: int, start: int | None, end: int | None) -> str:
+    """Numbered list of session FOLDERS (the numbers --start/--end use)."""
+    folders = group_by_folder(found)
+    first = 1 if start is None else start
+    last = len(folders) if end is None else end
+    marked = start is not None or end is not None
+    lines = [f"{'>' if marked and first <= n <= last else ' '}{n:4d}  {g[0]['format']:<12} "
+             f"{sum(s['bytes'] for s in g) / 1e9:8.2f} GB  {_segments_text(g):>12}  {g[0].get('folder', g[0]['url'])}"
+             for n, g in enumerate(folders, start=1)]
+    by_format: dict[str, int] = defaultdict(int)
+    for g in folders:
+        by_format[g[0]["format"]] += 1
+    per_segment = sum(len(g) for g in folders if g[0].get("segment") is not None)
+    lines.append(f"{len(folders)} sessions, {sum(s['bytes'] for s in found) / 1e9:.1f} GB"
                  + (f" ({', '.join(f'{k}: {v}' for k, v in sorted(by_format.items()))})" if found else "")
+                 + (f"; their {per_segment} robocap segments are judged one by one" if per_segment else "")
                  + (f"; {skipped} folder(s) without a recording in a known format not listed" if skipped else ""))
     if found and marked:
-        chosen = found[first - 1:last]
-        lines.append(f"'>' = selected by --start {first} --end {last}: {len(chosen)} sessions, "
-                     f"{sum(s['bytes'] for s in chosen) / 1e9:.1f} GB")
+        chosen = folders[first - 1:last]
+        lines.append(f"'>' = selected by --start {first} --end {last}: {len(chosen)} sessions "
+                     f"({sum(len(g) for g in chosen)} recordings), "
+                     f"{sum(s['bytes'] for g in chosen for s in g) / 1e9:.1f} GB")
     return "\n".join(lines)
 
 
@@ -266,8 +286,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             return EXIT_OK
 
         try:
+            # --start/--end count session folders (a robocap folder with 11 segments is one session)
             if args.session or args.sessions_file:
-                urls = args.session or read_sessions_file(args.sessions_file)
+                urls = select_range(args.session or read_sessions_file(args.sessions_file), args.start, args.end)
                 sessions = expand_segments(storage, [SessionRef.from_url(u, expected_bucket=config.get("source.bucket"),
                                                                          raw_root=config.get("source.raw_root"))
                                                      for u in urls], pattern)
@@ -281,13 +302,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                     # the source folder is itself a recording: name it relative to its parent
                     overrides["source.raw_root"] = root
                     config = load_ego_configuration(project_root, args.config, overrides)
+                chosen = select_range(group_by_folder(found), args.start, args.end)
                 sessions = [SessionRef.from_url(s["url"], expected_bucket=config.get("source.bucket"),
-                                                raw_root=config.get("source.raw_root")) for s in found]
+                                                raw_root=config.get("source.raw_root")) for g in chosen for s in g]
             else:
                 print("Say which recordings to process: --source FOLDER (optionally with --start/--end), "
                       "--session URL or --sessions-file FILE.", file=sys.stderr)
                 return EXIT_USAGE
-            sessions = select_range(sessions, args.start, args.end)
         except (PipelineError, ConfigError) as exc:
             print(f"Session list: {exc}", file=sys.stderr)
             return EXIT_USAGE

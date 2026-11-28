@@ -28,7 +28,7 @@ python scripts/run_gcs_batch.py --sessions-file sessions_10.txt
 |---|---|
 | `--source URL` | Folder to read recordings from: every folder below it whose files are a recording in a known format, numbered 1, 2, … in path order (as `--list-sessions` prints them, with each one's format; folder names sort as text, so `01-11-2026` comes before `31-10-2026`). A single recording folder works too. Default: `source.bucket` + `source.raw_root` (`gs://op-datoric/raw/`). Nothing is ever written below it. |
 | `--dest URL` | Folder to write results to. Each recording's result goes to `<dest>/<path of the recording below the source folder>/`, e.g. source `…/raw/Op_DD/31-10-2026/`, dest `…/processed/Op_DD/31-10-2026/` → `…/processed/Op_DD/31-10-2026/SDC509/session_00005-…/`. May be in another bucket. Must not be inside the source folder (or contain it). Default: `gs://op-datoric/processed/`. |
-| `--start N` / `--end N` | Process only recordings N…M of the numbered list (1 = first, `--end` included). Either may be left out (from the first / to the last). Also applies to a `--session`/`--sessions-file` list. |
+| `--start N` / `--end N` | Process only session folders N…M of the numbered list (a robocap folder with 11 segments is one session; all its segments are processed) (1 = first, `--end` included). Either may be left out (from the first / to the last). Also applies to a `--session`/`--sessions-file` list. |
 | `--list-sessions [URL]` | Print the numbered list for `--source` (or URL) with sizes, mark what `--start`/`--end` select, then exit. Processes nothing. |
 | `--session URL` (repeatable) / `--sessions-file FILE` | Instead of the whole source folder: these recordings (they must be below the source folder). |
 | `--content-screen on\|off` | Switch for section 3 (minors, private moments, …). Default off. `on` needs a content model, see "Turning on the content screen". |
@@ -87,8 +87,8 @@ robocap, 6 EGO-CAM live, 5 `capture.egoc`.
 times, so each segment is a recording of its own: it is listed, numbered, passed or failed and
 stored separately, as `<session folder>/#seg<N>` (results in `<session>/seg<N>/`). A broken segment
 (e.g. its MP4 has no index because the recorder was stopped) fails alone; the other segments of the
-session are still judged. `--list-sessions` therefore shows one line per robocap segment, and
-`--session <robocap folder>/` runs all its segments (`--session <folder>/#seg2` only that one).
+session are still judged. `--list-sessions` shows one numbered line per session folder with its number of segments, and
+`--start`/`--end` and `--session <robocap folder>/` run all its segments (`--session <folder>/#seg2` only that one).
 Joining the segments into one stream also made the decoder report one error at a segment
 boundary (measured on SDC482 session13: 0 errors when each segment is decoded alone).
 
